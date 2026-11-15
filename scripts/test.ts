@@ -20,6 +20,7 @@ import type { FaceMesh } from '../src/core/faces.ts'
 import { facing, pairFaces, suggestFromMatches } from '../src/core/geo-auto.ts'
 import { type Correspondence, type Homography, type Pt, applyH, findPlanes, ransacHomography } from '../src/core/homography.ts'
 import { type ClipGeometry, PROBE_N, isIdentity, needsCalibration, probeColour, probeLayout, probePlacement, probeText, readProbe, workingLut } from '../src/core/calibrate.ts'
+import { captureFitTests } from './capture-fit.ts'
 import { cameraB } from './synthetic.ts'
 
 let failures = 0
@@ -663,6 +664,8 @@ function heldOutError(opts: MatchOptions, train: Vec3[], test: Vec3[], cam: (c: 
   check('  ...a luma band keeps only that brightness, and greys the rest by their own luma', share === 0.25 && out[8] === 128 && out[12] === Math.round(pl.y[3] * 2.55), `share ${share}`)
   check('  ...grey pixels never fall in a hue range', !inQualifier({ hue: [0, 359] }, pl.y[2], pl.hue[2], pl.sat[2]))
 }
+
+captureFitTests(check)
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

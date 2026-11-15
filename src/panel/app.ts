@@ -24,6 +24,7 @@ import {
 } from '../core/scopes.ts'
 import { suggestFromMatches } from '../core/geo-auto.ts'
 import { type Calibration, type ClipGeometry, type ColourSetup, PROBE_N, type ProbePlacement, isIdentity, needsCalibration, probePlacement, probeText, readProbe, setupKey, setupName, workingLut } from '../core/calibrate.ts'
+import { type FracRect, cropBox, turnBack } from '../core/capture.ts'
 import { type Lut3D, applyLutToPixels, bakeLut, toCube, toEmbeddedText } from '../core/lut.ts'
 import {
   DEFAULT_OPTIONS,
@@ -221,8 +222,9 @@ function escapeHtml(s: string): string {
  * Crop a captured PNG, in place, to `rect` (fractions of the frame): the
  * clip's own frame within the sequence frame. A pixel in from each edge, off
  * the blend with whatever is around it. Left alone when it is the whole frame.
+ * `turn`: Premiere showed the clip turned 90° clockwise, so it is turned back.
  */
-async function cropCapture(file: string, rect: { x0: number; y0: number; x1: number; y1: number }, width: number, height: number): Promise<void> {
+async function cropCapture(file: string, rect: FracRect, width: number, height: number, turn = false): Promise<void> {
   const img = await new Promise<HTMLImageElement>((res, rej) => {
     const i = new Image()
     i.onload = () => res(i)
@@ -231,24 +233,22 @@ async function cropCapture(file: string, rect: { x0: number; y0: number; x1: num
   })
   const W = img.naturalWidth || width
   const H = img.naturalHeight || height
-  let x0 = Math.ceil(rect.x0 * W)
-  let y0 = Math.ceil(rect.y0 * H)
-  let x1 = Math.floor(rect.x1 * W)
-  let y1 = Math.floor(rect.y1 * H)
-  if (x0 <= 0 && y0 <= 0 && x1 >= W && y1 >= H) return
-  if (x0 > 0) x0++
-  if (y0 > 0) y0++
-  if (x1 < W) x1--
-  if (y1 < H) y1--
-  x0 = Math.max(0, x0)
-  y0 = Math.max(0, y0)
-  x1 = Math.min(W, x1)
-  y1 = Math.min(H, y1)
-  if (x1 - x0 < 16 || y1 - y0 < 16) return
+  const box = cropBox(rect, W, H) ?? (turn ? { x: 0, y: 0, w: W, h: H } : null)
+  if (!box) return
   const c = document.createElement('canvas')
-  c.width = x1 - x0
-  c.height = y1 - y0
-  c.getContext('2d')!.drawImage(img, x0, y0, c.width, c.height, 0, 0, c.width, c.height)
+  c.width = box.w
+  c.height = box.h
+  const ctx = c.getContext('2d')!
+  ctx.drawImage(img, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h)
+  if (turn) {
+    // Exact pixels, no resampling: turned in memory, not by a canvas transform.
+    const back = turnBack(ctx.getImageData(0, 0, box.w, box.h))
+    c.width = back.width
+    c.height = back.height
+    const out = ctx.createImageData(back.width, back.height)
+    out.data.set(back.data)
+    ctx.putImageData(out, 0, 0)
+  }
   const png = c.toDataURL('image/png').split(',')[1]
   const bin = atob(png)
   const bytes = new Uint8Array(bin.length)
@@ -888,7 +888,7 @@ Captured in ${setupName(colour)} colour management` : ''}`
       const file = await node.waitForFile([`${base}.png`, base])
       // Just the clip: the bars around a clip fitted whole show the tracks below.
       const whole = info.clip?.whole
-      if (whole) await cropCapture(file, whole.rect, info.width, info.height)
+      if (whole) await cropCapture(file, whole.rect, info.width, info.height, whole.turn === 90)
       const who = info.clip ? info.clip.name : info.sequence
       const label = `${who} @ ${info.timecode}${info.clip?.multicam ? ' (multicam)' : ''}`
       await this.loadImage(role, node.readDataUrl(file), label, file, colour, info.clip)
@@ -898,6 +898,8 @@ Captured in ${setupName(colour)} colour management` : ''}`
       if (role === 'target') this.recalibrate = true
       if (role === 'target' && info.clip) this.autoName(info.clip.name)
       log(`${role}: ${label}${this.leftOut(info.clip)}`)
+      if (info.clip?.keyedMatch)
+        log(`${info.clip.name}'s ProMatch Amount is keyframed, so ProMatch didn't switch it off (that would change the keyframes): this capture includes its match. Remove the Amount keyframes, or capture where it's at 0%.`, 'warn')
     } catch (e) {
       log(`Capture failed: ${(e as Error).message}`, 'error')
     }
@@ -949,12 +951,13 @@ Captured in ${setupName(colour)} colour management` : ''}`
   private leftOut(clip: host.CaptureClip | null): string {
     if (!clip?.raw) return ''
     const parts: string[] = []
-    if (clip.whole?.reframed) parts.push(`the whole ${clip.whole.width}×${clip.whole.height} frame, fitted for the capture`)
+    if (clip.whole?.reframed) parts.push(`the whole ${clip.whole.width}×${clip.whole.height} frame, fitted${clip.whole.turn === 90 ? ' turned on its side (more of its pixels fit)' : ''} for the capture`)
     if (clip.keyframed) parts.push('Motion is keyframed, so as framed')
     if (clip.fitError) parts.push(`as framed (couldn't fit the whole clip: ${clip.fitError})`)
     if (clip.hidden?.length) parts.push(`without ${clip.hidden.map((t) => `V${t}`).join(', ')} above it`)
     if (clip.shown) parts.push(`V${clip.track} shown for it`)
     if (clip.bypassed) parts.push(`its ProMatch off`)
+    if (clip.keyedMatch) parts.push(`its ProMatch left on, as its Amount is keyframed`)
     return parts.length ? ` (${parts.join('; ')})` : ''
   }
 
@@ -1752,9 +1755,9 @@ Captured in ${setupName(colour)} colour management` : ''}`
    * Measure what Premiere does after the effect in this sequence
    * (calibrate.ts): the effect on the target clips draws the test pattern
    * (the caller has set it, placed as `place`), the Program Monitor frame is
-   * captured and read. If that fails and the clip may have Scale to Frame
-   * Size on (scripting can't tell), the pattern is placed for that and read
-   * again. The clips keep showing the pattern until the caller applies the
+   * captured and read. If that fails and Premiere couldn't say whether the
+   * clip has Scale to Frame Size on, the pattern is placed for it being on
+   * and read again. The clips keep showing the pattern until the caller applies the
    * real LUT.
    */
   private async calibrate(id: number, geometry: ClipGeometry | null, place: ProbePlacement | undefined): Promise<Calibration> {
@@ -1763,7 +1766,9 @@ Captured in ${setupName(colour)} colour management` : ''}`
     } catch (e) {
       let fitted: ProbePlacement | undefined
       try {
-        fitted = geometry && place ? probePlacement(geometry, PROBE_N, true) : undefined
+        // Only a guess when Premiere couldn't say (QE item not found).
+        const unknown = geometry?.scaleToFrame === null || geometry?.scaleToFrame === undefined
+        fitted = geometry && place && unknown ? probePlacement(geometry, PROBE_N, true) : undefined
       } catch {
         fitted = undefined
       }

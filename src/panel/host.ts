@@ -46,12 +46,16 @@ export interface CaptureClip {
   shown?: boolean
   /** ProMatch effects set to 0% for the capture. */
   bypassed?: number
+  /** ProMatch effects left on because their Amount is keyframed: the capture includes their match. */
+  keyedMatch?: number
   /**
    * Where the clip's whole frame is in the captured sequence frame (fractions),
    * and the clip's frame size. `reframed`: Motion was changed for the capture
    * to fit all of it (16:9 footage in a 9:16 sequence); the panel crops to it.
+   * `turn` 90: it was also turned 90° clockwise, because it fits bigger that
+   * way; the panel turns it back.
    */
-  whole?: { rect: { x0: number; y0: number; x1: number; y1: number }; width: number; height: number; reframed: boolean }
+  whole?: { rect: { x0: number; y0: number; x1: number; y1: number }; width: number; height: number; reframed: boolean; turn?: number }
   /** Motion is keyframed, so the capture shows the clip as framed. */
   keyframed?: boolean
   /** Fitting the whole clip failed (why); the capture shows it as framed. */

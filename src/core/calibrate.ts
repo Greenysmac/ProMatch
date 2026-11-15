@@ -82,17 +82,20 @@ export interface ClipGeometry {
     /** Motion's crop (Premiere 26+): left, top, right, bottom in percent of the clip's frame. */
     crop?: [number, number, number, number]
   } | null
+  /** The clip has Scale to Frame Size on (read through QE); null or absent when unknown. */
+  scaleToFrame?: boolean | null
 }
 
 /**
  * Where to draw the pattern so that it fills the part of the sequence frame
  * the clip covers, with square cells on screen. `scaleToFrame`: the clip has
  * Scale to Frame Size on, so Premiere first fits its frame to the sequence's
- * and Motion scales that (scripting can't tell, so the panel tries both).
+ * and Motion scales that (g.scaleToFrame; when that's unknown the panel
+ * tries both).
  * Without the clip's size or Motion, the whole frame, as before. Throws when
  * the pattern can't be shown: the clip is rotated, off screen or too small.
  */
-export function probePlacement(g: ClipGeometry, n = PROBE_N, scaleToFrame = false): ProbePlacement | undefined {
+export function probePlacement(g: ClipGeometry, n = PROBE_N, scaleToFrame = g.scaleToFrame === true): ProbePlacement | undefined {
   const sq = g.sequence
   const md = g.media
   const m = g.motion

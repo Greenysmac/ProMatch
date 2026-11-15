@@ -15,8 +15,13 @@ Installing: [INSTALL.md](INSTALL.md). How the match is computed: [HOW-IT-WORKS.m
    match never matches on top of it. Its Lumetri and other effects stay in. A clip that Motion
    shows only part of (16:9 footage reframed in a 9:16 sequence, or cropped) is captured whole:
    for that instant it is fitted into the frame, then put back, and the capture is cropped to
-   it, so there is more of the scene to match on. Not when Motion is keyframed: then it's
-   captured as framed.
+   it, so there is more of the scene to match on. When it fits bigger on its side (16:9 in a
+   9:16 sequence), it is also turned 90° for that instant and the panel turns the capture back:
+   a 1920×1080 clip in a 1080×1920 sequence comes out at 1920×1080, not 1080×608. A clip shown
+   smaller than it could be (fitted with bars, or picture in picture) is captured at the bigger
+   size too, never past 100%. With Scale to Frame Size on, it is switched off for that instant,
+   so the capture gets the clip's own pixels. Not when Motion is keyframed: then it's captured
+   as framed.
 3. **Points.** Press **Auto** for a starting set of pairs (dashed, marked *A*), including a few
    on each face. Check them and delete any that look wrong, then add a few of your own,
    especially on plain areas Auto can't reach: click something on

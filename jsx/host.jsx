@@ -285,8 +285,9 @@ function PM_projectInfo() {
  * With `a.raw` it is the camera alone (_pmCameraClip): the tracks above it
  * with a clip there hidden, its own track shown, its ProMatch effects at 0%,
  * and the whole of its frame fitted into the sequence's when Motion shows
- * only part of it (_pmFitWhole; info.clip.whole says where, so the panel
- * crops to it), all put back as soon as the export returns. Without
+ * only part of it, turned 90° when that fits bigger (_pmFitWhole;
+ * info.clip.whole says where and how, so the panel crops to it and turns it
+ * back), all put back as soon as the export returns. Without
  * (calibration), the frame as the Program Monitor shows it.
  */
 function PM_captureFrame(argJson) {
@@ -306,6 +307,7 @@ function PM_captureFrame(argJson) {
         var pos = _pmTicks(seq.getPlayerPosition());
         var tracks = [];
         var amounts = [];
+        var keyedAmounts = 0;
         var fit = null;
         try {
             for (var t = pick.track + 1; t < seq.videoTracks.numTracks; t++) {
@@ -324,18 +326,28 @@ function PM_captureFrame(argJson) {
                 var comp = pick.clip.components[k];
                 if (String(comp.matchName).indexOf(PM_EFFECT_MATCH) === -1) continue;
                 var amount = _pmParam(comp, "Amount");
+                // Keyframed: setting it would touch the keyframes, so it stays on.
+                if (amount && typeof amount.isTimeVarying === "function" && amount.isTimeVarying()) {
+                    keyedAmounts++;
+                    continue;
+                }
                 var v = amount ? Number(amount.getValue()) : 0;
                 if (!v) continue;
                 amount.setValue(0, true);
                 amounts.push({ param: amount, value: v });
             }
             try {
-                fit = _pmFitWhole(seq, pick.clip);
+                fit = _pmFitWhole(seq, pick.clip, _pmQeItemOf(seq, pick.track, pick.clip));
             } catch (e0) {
                 fit = { error: String(e0) };
             }
             q.exportFramePNG(tc, a.path);
         } finally {
+            if (fit && fit.stf) {
+                try {
+                    fit.stf.setScaleToFrameSize(true);
+                } catch (e4) {}
+            }
             if (fit && fit.saved) {
                 for (var s = fit.saved.length - 1; s >= 0; s--) {
                     try {
@@ -359,8 +371,9 @@ function PM_captureFrame(argJson) {
         for (var h = 0; h < tracks.length; h++) if (!tracks[h].muted) info.clip.hidden.push(tracks[h].n);
         info.clip.shown = tracks.length > 0 && !!tracks[tracks.length - 1].muted;
         info.clip.bypassed = amounts.length;
+        if (keyedAmounts) info.clip.keyedMatch = keyedAmounts;
         info.clip.raw = true;
-        if (fit && fit.rect) info.clip.whole = { rect: fit.rect, width: fit.width, height: fit.height, reframed: !!fit.saved };
+        if (fit && fit.rect) info.clip.whole = { rect: fit.rect, width: fit.width, height: fit.height, reframed: !!fit.saved, turn: fit.turn || 0 };
         if (fit && fit.keyframed) info.clip.keyframed = true;
         if (fit && fit.error) info.clip.fitError = fit.error;
         return info;
@@ -536,17 +549,52 @@ function _pmMediaSize(clip) {
     }
 }
 
+/** The QE item of DOM `clip` on `seq`'s video track `track` (0-based), else null. */
+function _pmQeItemOf(seq, track, clip) {
+    try {
+        var clips = seq.videoTracks[track].clips;
+        for (var c = 0; c < clips.numItems; c++) {
+            if (clips[c].start.ticks !== clip.start.ticks) continue;
+            app.enableQE();
+            var it = _pmQeItem(track, c);
+            return it && String(it.name) === String(clip.name) ? it : null;
+        }
+    } catch (e) {}
+    return null;
+}
+
+/** The clip has Scale to Frame Size on (QE only; the DOM doesn't say). False when unknown. */
+function _pmScaleToFrame(qeItem) {
+    try {
+        return !!qeItem && qeItem.scaleToFrameSize === true;
+    } catch (e) {
+        return false;
+    }
+}
+
 /**
  * For a capture, fit the clip's whole frame into the sequence frame when
- * Motion shows only part of it (16:9 footage in a 9:16 sequence): more of
- * the scene to match on. Centred, scaled to fit, no rotation or crop.
+ * Motion shows only part of it (16:9 footage in a 9:16 sequence), or shows
+ * it smaller than it could: more of the scene, at more of its pixels.
+ * Centred, scaled to fit, no crop, and turned 90° when the turned frame
+ * fits bigger (16:9 footage in a 9:16 sequence: 1080×1920 instead of
+ * 1080×608), so `turn` tells the panel to turn the capture back. Turning
+ * needs square sequence pixels, which every vertical preset has.
+ *
+ * With Scale to Frame Size on (`qeItem.scaleToFrameSize`), Premiere first
+ * shrinks the clip's frame to fit the sequence's and Motion scales that, so
+ * the footprint is worked out on the fitted size; a refit switches it off
+ * for the capture (`stf`, put back by the caller), so the capture gets the
+ * clip's own pixels.
+ *
  * Returns { saved: [{ param, value }] to put back (null if nothing changed),
- * rect: where the clip's frame is in the sequence frame (fractions),
- * width, height: the clip's frame }, { keyframed: true } when Motion is
- * animated (changing it would add keyframes), or null when the clip's size
- * or Motion can't be read.
+ * stf: the QE item to switch Scale to Frame Size back on (else null),
+ * rect: where the clip's frame is in the sequence frame (fractions), turn:
+ * 90 when it is turned clockwise there (else 0), width, height: the clip's
+ * frame }, { keyframed: true } when Motion is animated (changing it would
+ * add keyframes), or null when the clip's size or Motion can't be read.
  */
-function _pmFitWhole(seq, clip) {
+function _pmFitWhole(seq, clip, qeItem) {
     var media = _pmMediaSize(clip);
     if (!media) return null;
     var motion = null;
@@ -573,25 +621,43 @@ function _pmFitWhole(seq, clip) {
     // Display units (pixels times pixel aspect), the space Motion works in.
     var Sw = Number(seq.frameSizeHorizontal) * spar, Sh = Number(seq.frameSizeVertical);
     var Cw = media.width * media.par, Ch = media.height;
-    var f = Math.min(Sw / Cw, Sh / Ch);
-    var fw = (Cw * f) / Sw, fh = (Ch * f) / Sh;
+    // The frame Motion scales now: with Scale to Frame Size, the clip's fitted to the sequence's.
+    var stf = _pmScaleToFrame(qeItem);
+    var g = stf ? Math.min(Sw / Cw, Sh / Ch) : 1;
+    // The refit, on the clip's own frame: as it is, or turned 90° when that
+    // fits bigger. Never past 100%: upscaling adds no detail, so a small
+    // clip is captured at its own size, and turned only for a real gain.
+    var f0 = Math.min(Sw / Cw, Sh / Ch, 1);
+    var f90 = Math.abs(spar - 1) < 0.001 ? Math.min(Sw / Ch, Sh / Cw, 1) : 0;
+    var turn = f90 > f0 * 1.02;
+    var f = turn ? f90 : f0;
+    var fw = ((turn ? Ch : Cw) * f) / Sw, fh = ((turn ? Cw : Ch) * f) / Sh;
     var rect = { x0: (1 - fw) / 2, y0: (1 - fh) / 2, x1: (1 + fw) / 2, y1: (1 + fh) / 2 };
-    var out = { saved: null, rect: rect, width: media.width, height: media.height };
-    // Already the whole clip, unrotated and uncropped: leave it.
+    var out = { saved: null, stf: null, rect: rect, turn: turn ? 90 : 0, width: media.width, height: media.height };
+    // Already the whole clip, unrotated, uncropped, at as many of its pixels
+    // as the refit would show: leave it.
     var pos = p["Position"].getValue(), anc = p["Anchor Point"].getValue();
     var sy = Number(p["Scale"].getValue()) / 100;
     var isUniform = !uniform || String(uniform.getValue()) === "true";
     var sx = isUniform ? sy : Number(p["Scale Width"].getValue()) / 100;
-    var cx0 = Number(pos[0]) * Sw - sx * Number(anc[0]) * Cw, cy0 = Number(pos[1]) * Sh - sy * Number(anc[1]) * Ch;
+    var Fw = Cw * g, Fh = Ch * g;
+    var cx0 = Number(pos[0]) * Sw - sx * Number(anc[0]) * Fw, cy0 = Number(pos[1]) * Sh - sy * Number(anc[1]) * Fh;
     var cropped = false;
     for (var c = 5; c < names.length; c++) if (p[names[c]] && Math.abs(Number(p[names[c]].getValue())) > 1e-6) cropped = true;
     var turned = Math.abs(Number(p["Rotation"].getValue())) > 1e-6;
     var tol = 0.5;
-    if (!cropped && !turned && cx0 >= -tol && cy0 >= -tol && cx0 + sx * Cw <= Sw + tol && cy0 + sy * Ch <= Sh + tol) {
-        out.rect = { x0: cx0 / Sw, y0: cy0 / Sh, x1: (cx0 + sx * Cw) / Sw, y1: (cy0 + sy * Ch) / Sh };
+    var inside = cx0 >= -tol && cy0 >= -tol && cx0 + sx * Fw <= Sw + tol && cy0 + sy * Fh <= Sh + tol;
+    var shown = Math.min(sx, sy) * g; // the clip's pixels per sequence pixel now
+    if (!cropped && !turned && inside && shown >= f * 0.98) {
+        out.rect = { x0: cx0 / Sw, y0: cy0 / Sh, x1: (cx0 + sx * Fw) / Sw, y1: (cy0 + sy * Fh) / Sh };
+        out.turn = 0;
         return out;
     }
     out.saved = [];
+    if (stf) {
+        qeItem.setScaleToFrameSize(false);
+        out.stf = qeItem;
+    }
     var set = function (name, value) {
         if (!p[name]) return;
         out.saved.push({ param: p[name], value: p[name].getValue() });
@@ -601,7 +667,7 @@ function _pmFitWhole(seq, clip) {
     set("Position", [0.5, 0.5]);
     set("Scale", f * 100);
     set("Scale Width", f * 100);
-    set("Rotation", 0);
+    set("Rotation", turn ? 90 : 0); // positive is clockwise (tested 27.0.0)
     for (var k = 5; k < names.length; k++) set(names[k], 0);
     return out;
 }
@@ -631,6 +697,8 @@ function PM_clipGeometry() {
         var clip = top.clip;
         out.clip = { name: clip.name, track: top.track + 1 };
         out.media = _pmMediaSize(clip);
+        var qi = _pmQeItemOf(seq, top.track, clip);
+        out.scaleToFrame = qi ? _pmScaleToFrame(qi) : null;
         try {
             var motion = null;
             for (var i = 0; i < clip.components.numItems; i++) {

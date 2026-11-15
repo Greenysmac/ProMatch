@@ -14,6 +14,13 @@ the update check compares it with the version the panel was built with.
   up or cropped) are of its whole frame: fitted into the sequence frame for the capture, put
   back straight after, and cropped to the clip. More of the scene to match on. A clip with
   keyframed Motion is captured as framed.
+- **Sharper captures in vertical sequences.** When the clip fits bigger on its side (16:9 in
+  9:16, 4:5, or 9:16 phone footage in 16:9), it is turned 90° for the capture too and turned
+  back in the panel: 16:9 HD in a 9:16 HD sequence is captured at 1920×1080 instead of
+  1080×608. A clip shown smaller than it could be (letterboxed, picture in picture) is captured
+  at the bigger size, never upscaled past 100%. Scale to Frame Size is now read (through QE):
+  captures switch it off for the instant, so its footprint is no longer worked out from the
+  wrong size, and calibration places the pattern for it straight away instead of guessing.
 - The effect tells Premiere its GPU render keeps up with playback, as the SDK recommends, and
   `effect.log` records the GPU filter's registration, its frame layout and any GPU render that
   can't run, so a switch to CPU rendering can be traced.
