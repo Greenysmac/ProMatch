@@ -67,9 +67,16 @@ static std::vector<float> cpuRef(const pm::Lut3D& lut, std::vector<float> px, in
 }
 
 static const int kProbe = 17;
+// Over part of the frame, as for a clip reframed in a vertical sequence: the
+// kernels must put each cell where the CPU does, and leave black around it.
+static pm::Lut3D probeLut() {
+    pm::Lut3D p;
+    pm::parseEmbeddedText("PMLUTP 17 53 93 300000 20000 650000 990000", p);
+    return p;
+}
 static std::vector<float> probeRef(int w, int h, bool half) {
     std::vector<float> px(size_t(w) * h * 4);
-    pm::fillProbeF(kProbe, pm::ImageF{px.data(), w, h, long(w) * 16, pm::Layout::BGRA});
+    pm::fillProbeF(kProbe, pm::probeArea(probeLut(), w, h), pm::ImageF{px.data(), w, h, long(w) * 16, pm::Layout::BGRA});
     if (half)
         for (auto& v : px) v = fromHalf(toHalf(v));
     return px;
@@ -174,8 +181,14 @@ int main(int argc, char** argv) {
         report(half ? "metal 16f src->dst" : "metal 32f in-place", unpack(pmmetal::Contents(b), bgra.size(), half),
                cpuRef(lut, bgra, w, h, amount, half), ms);
         LutKernelArgs pa = argsFor(lut, w, h, half, amount);
+        const pm::ProbeArea area = pm::probeArea(probeLut(), w, h);
         pa.probe = kProbe;
-        pm::probeGrid(kProbe, w, h, &pa.probeCols, &pa.probeRows);
+        pa.probeCols = area.cols;
+        pa.probeRows = area.rows;
+        pa.probeX0 = area.x0;
+        pa.probeY0 = area.y0;
+        pa.probeX1 = area.x1;
+        pa.probeY1 = area.y1;
         pmmetal::Launch(queue, pipeline, a, b, lutBuf, pa, true, &err);
         report(half ? "metal 16f pattern" : "metal 32f pattern", unpack(pmmetal::Contents(b), bgra.size(), half),
                probeRef(w, h, half), 0);

@@ -15,7 +15,7 @@ and an Amount slider.
 | **Adobe After Effects SDK** (latest; Premiere hosts AE-API effects) | **Installed** (`native/sdk/aesdk/`) | Download from developer.adobe.com/console/servicesandapis/ae (needs your Adobe ID) and unzip to `F:\ProMatch\native\sdk\aesdk\` (`native/sdk/` is gitignored) |
 | **Adobe Premiere Pro SDK** (the GPU filter API: `PrSDKGPUFilter.h`, sample `GPUVideoFilter`) | **Installed** (`native/sdk/prsdk/`) | Same site, Premiere Pro; unzip to `F:\ProMatch\native\sdk\prsdk\` |
 | **NVIDIA CUDA Toolkit** (only `nvcc`, to compile the CUDA kernel; the plug-in doesn't need it) | **Installed** (13.4, default folder) | developer.nvidia.com/cuda-downloads, Custom install without the driver components. Without it the build is CPU + OpenCL. |
-| Plug-in folder link | **Done** | Once, in an **admin** prompt: `mklink /J "C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\ProMatch" "F:\ProMatch\native\out"`. After that, builds land in Premiere's plug-in folder without admin rights. |
+| Plug-in folder link | **Done** | Once, in an **admin** prompt: `mkdir "C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\ProMatch"` then `mklink "C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\ProMatch\ProMatch.aex" "F:\ProMatch\native\out\ProMatch.aex"`. After that, builds land in Premiere's plug-in folder without admin rights. A real folder with a file link: Premiere 27 skips a junctioned *folder* (26 followed it). |
 
 Premiere loads effects at start-up, so each new build means restarting Premiere (the panel's
 session survives that).

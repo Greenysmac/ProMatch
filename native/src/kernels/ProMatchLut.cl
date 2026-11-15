@@ -10,11 +10,13 @@ float pmUnit(float v, float lo, float hi) {
 
 // One BGRA pixel of a Premiere GPU frame: 4 floats, or 4 halves when is16f.
 // src and dst may be the same frame. Pitches are in pixels. probe > 0 draws
-// the calibration pattern (n = probe, in a probeCols x probeRows grid) instead.
+// the calibration pattern (n = probe, in a probeCols x probeRows grid over
+// pixels [probeX0, probeX1) x [probeY0, probeY1), black around it) instead.
 __kernel void ProMatchLut(__global const void* src, int srcPitch, __global void* dst, int dstPitch, int is16f,
                           int width, int height, __global const float* lut, int size, float dminR, float dminG,
                           float dminB, float dmaxR, float dmaxG, float dmaxB, float amount,
-                          int probe, int probeCols, int probeRows) {
+                          int probe, int probeCols, int probeRows, int probeX0, int probeY0, int probeX1,
+                          int probeY1) {
     const int x = get_global_id(0);
     const int y = get_global_id(1);
     if (x >= width || y >= height) return;
@@ -23,10 +25,12 @@ __kernel void ProMatchLut(__global const void* src, int srcPitch, __global void*
 
     // Calibration pattern (pm::probeColour in lut_engine.cpp): replaces the picture.
     if (probe > 0) {
-        const int idx = (int)((long)y * probeRows / height) * probeCols + (int)((long)x * probeCols / width);
+        const bool inArea = x >= probeX0 && x < probeX1 && y >= probeY0 && y < probeY1;
+        const int idx = (int)((long)(y - probeY0) * probeRows / (probeY1 - probeY0)) * probeCols +
+                        (int)((long)(x - probeX0) * probeCols / (probeX1 - probeX0));
         const float k = 1.f / (float)(probe - 1);
         float4 q = (float4)(0.f, 0.f, 0.f, 1.f);
-        if (idx < probe * probe * probe)
+        if (inArea && idx < probe * probe * probe)
             q = (float4)((float)(idx / (probe * probe)) * k, (float)(idx / probe % probe) * k, (float)(idx % probe) * k, 1.f);
         if (is16f)
             vstore_half4_rte(q, di, (__global half*)dst);

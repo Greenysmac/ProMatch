@@ -9,9 +9,9 @@
 #define PM_MAJOR 1
 #define PM_MINOR 0
 #define PM_BUG   0
-#define PM_BUILD 11
+#define PM_BUILD 12
 // PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, PM_BUILD); must equal AE_Effect_Version in the PiPL.
-#define PM_VERSION_PACKED 524299
+#define PM_VERSION_PACKED 524300
 
 // Parameter indices (0 is the input layer). The GPU filter reads them too.
 // Build 7 dropped the visible Match ID (index 1 before): the ID now travels

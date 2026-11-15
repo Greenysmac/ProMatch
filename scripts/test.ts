@@ -19,7 +19,7 @@ import { suggestPairs } from '../src/core/auto.ts'
 import type { FaceMesh } from '../src/core/faces.ts'
 import { facing, pairFaces, suggestFromMatches } from '../src/core/geo-auto.ts'
 import { type Correspondence, type Homography, type Pt, applyH, findPlanes, ransacHomography } from '../src/core/homography.ts'
-import { PROBE_N, needsCalibration, probeColour, probeLayout, readProbe, workingLut } from '../src/core/calibrate.ts'
+import { type ClipGeometry, PROBE_N, isIdentity, needsCalibration, probeColour, probeLayout, probePlacement, probeText, readProbe, workingLut } from '../src/core/calibrate.ts'
 import { cameraB } from './synthetic.ts'
 
 let failures = 0
@@ -450,7 +450,103 @@ function heldOutError(opts: MatchOptions, train: Vec3[], test: Vec3[], cam: (c: 
     refused = true
   }
   check('  ...a frame that is not the pattern is refused', refused)
-  check('  ...Rec.709 needs none, ACEScct does', !needsCalibration({ name: 'Rec. 709', isSceneReferred: false }) && needsCalibration({ name: 'ACEScct', isSceneReferred: true }))
+  const rec709 = { name: 'Rec. 709', isSceneReferred: false }
+  check(
+    '  ...Rec.709 needs none, ACEScct does, Rec.709 with linear compositing does',
+    !needsCalibration({ working: rec709 }) && !needsCalibration({ working: rec709, linearComposite: false }) &&
+      needsCalibration({ working: { name: 'ACEScct', isSceneReferred: true } }) && needsCalibration({ working: rec709, linearComposite: true }),
+  )
+  const flat = (f: (v: number) => number, noise = 0): number[] => {
+    const t: number[] = []
+    for (let idx = 0; idx < PROBE_N ** 3; idx++) for (const v of probeColour(PROBE_N, idx)) t.push(Math.min(1, Math.max(0, f(v) + noise * Math.sin(idx * 12.9898 + v * 78.233))))
+    return t
+  }
+  const asCal = (table: number[]) => ({ n: PROBE_N, table, flipped: false, fit: 1 })
+  check(
+    '  ...a display that shows the effect as is counts as identity (capture noise too); linear light does not',
+    isIdentity(asCal(flat((v) => v))) && isIdentity(asCal(flat((v) => Math.round(v * 255) / 255 + 0.4 / 255, 1 / 255))) && !isIdentity(asCal(flat((v) => v ** (1 / 2.2)))),
+  )
+
+  // A reframed clip (the bug report: 16:9 UHD footage in a 9:16 ACEScct
+  // sequence). Premiere hands the effect the clip's own frame and Motion
+  // puts a slice of it on screen, so a pattern over the whole clip frame
+  // can't be read; placed in the slice that shows, it can.
+  const SW = 1080
+  const SH = 1920
+  const CW = 3840
+  const CH = 2160
+  const shot = (g: ClipGeometry, stf = false, oldWholeFrame = false) => {
+    const place = probePlacement(g, PROBE_N, stf)!
+    // The effect (lut_engine.cpp probeArea/probeColour) on the frame Premiere
+    // hands it: the clip's, or fitted to the sequence with Scale to Frame Size.
+    const m = probeText(PROBE_N, place).split(' ').map(Number)
+    if (oldWholeFrame) m.splice(2, 6, probeLayout(PROBE_N, CW, CH).cols, probeLayout(PROBE_N, CW, CH).rows, 0, 0, 1e6, 1e6)
+    const f = stf ? Math.min(SW / CW, SH / CH) : 1
+    const fw = Math.round(CW * f)
+    const fh = Math.round(CH * f)
+    const [cols, rows] = [m[2], m[3]]
+    const ax0 = Math.round((m[4] / 1e6) * fw)
+    const ay0 = Math.round((m[5] / 1e6) * fh)
+    const ax1 = Math.max(ax0 + 1, Math.round((m[6] / 1e6) * fw))
+    const ay1 = Math.max(ay0 + 1, Math.round((m[7] / 1e6) * fh))
+    // Motion, as it really is (g), takes clip pixels to the screen.
+    const mo = g.motion!
+    const sx = (mo.uniform ? mo.scale : mo.scaleWidth) / 100
+    const sy = mo.scale / 100
+    const px = new Uint8ClampedArray(SW * SH * 4)
+    for (let y = 0; y < SH; y++) {
+      for (let x = 0; x < SW; x++) {
+        const cx = Math.floor((x + 0.5 - mo.position[0] * SW) / sx + mo.anchor[0] * fw)
+        const cy = Math.floor((y + 0.5 - mo.position[1] * SH) / sy + mo.anchor[1] * fh)
+        let c: Vec3 = [0.3, 0.3, 0.3] // the tracks below
+        if (cx >= 0 && cy >= 0 && cx < fw && cy < fh) {
+          c = [0, 0, 0]
+          if (cx >= ax0 && cx < ax1 && cy >= ay0 && cy < ay1) {
+            const idx = Math.floor(((cy - ay0) * rows) / (ay1 - ay0)) * cols + Math.floor(((cx - ax0) * cols) / (ax1 - ax0))
+            if (idx < PROBE_N ** 3) c = probeColour(PROBE_N, idx)
+          }
+          c = display(c)
+        }
+        px.set([Math.round(c[0] * 255), Math.round(c[1] * 255), Math.round(c[2] * 255), 255], (y * SW + x) * 4)
+      }
+    }
+    return { img: { width: SW, height: SH, data: px }, place }
+  }
+  const reframed = (motion: Partial<NonNullable<ClipGeometry['motion']>>): ClipGeometry => ({
+    sequence: { width: SW, height: SH, par: 1 },
+    clip: { name: 'A001', track: 1 },
+    media: { width: CW, height: CH, par: 1 },
+    motion: { position: [0.5, 0.5], scale: 100, scaleWidth: 100, uniform: true, rotation: 0, anchor: [0.5, 0.5], ...motion },
+  })
+  const fit = (fn: () => number) => {
+    try {
+      return fn()
+    } catch {
+      return 0
+    }
+  }
+  const asDefault = shot(reframed({}))
+  const filled = shot(reframed({ scale: 100 * (SH / CH), position: [0.38, 0.5] }))
+  const zoomed = shot(reframed({ scale: 140, position: [0.6, 0.45], anchor: [0.3, 0.55] }))
+  const wholeFrame = fit(() => readProbe(shot(reframed({ scale: 100 * (SH / CH), position: [0.38, 0.5] }), false, true).img).fit)
+  const reads = [asDefault, filled, zoomed].map((s) => fit(() => readProbe(s.img, PROBE_N, s.place).fit))
+  check('calibration, reframed clip: the old whole-frame read fails', wholeFrame < 0.95, `fit ${wholeFrame.toFixed(3)}`)
+  check('  ...the placed pattern reads at default Motion, filled and offset, zoomed with a moved anchor', reads.every((f) => f > 0.95), reads.map((f) => f.toFixed(3)).join(', '))
+  // Smaller than the frame (fitted, letterboxed): the pattern covers only the clip.
+  const boxed = shot(reframed({ scale: 100 * (SW / CW) }))
+  check('  ...and a letterboxed clip, read from the strip it covers', fit(() => readProbe(boxed.img, PROBE_N, boxed.place).fit) > 0.95, `screen ${boxed.place.screen.y0.toFixed(3)}..${boxed.place.screen.y1.toFixed(3)}`)
+  // Scale to Frame Size: Premiere fits the frame first; the panel's retry places for that.
+  const stfGeo = reframed({ scale: 100 * (SH / CH) / Math.min(SW / CW, SH / CH), position: [0.42, 0.5] })
+  const stfShot = shot(stfGeo, true)
+  check('  ...and Scale to Frame Size, placed for it', fit(() => readProbe(stfShot.img, PROBE_N, stfShot.place).fit) > 0.95)
+  let rotated = ''
+  try {
+    probePlacement(reframed({ rotation: 90 }))
+  } catch (e) {
+    rotated = (e as Error).message
+  }
+  check('  ...a rotated clip is refused, saying why', /rotated 90/.test(rotated))
+  check('  ...without the clip size or Motion, the whole frame as before', probePlacement({ ...reframed({}), media: null }) === undefined && probeText(PROBE_N) === 'PMLUTP 17')
 }
 
 {

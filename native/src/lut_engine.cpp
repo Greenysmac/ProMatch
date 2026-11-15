@@ -253,30 +253,43 @@ void probeGrid(int n, int width, int height, int* cols, int* rows) {
     *rows = (count + *cols - 1) / *cols;
 }
 
-void probeColour(int n, int cols, int rows, int width, int height, int x, int y, float out[3]) {
-    const int col = int((long long)x * cols / width);
-    const int row = int((long long)y * rows / height);
-    const int idx = row * cols + col;
-    if (idx >= n * n * n) {
-        out[0] = out[1] = out[2] = 0.f;
-        return;
+ProbeArea probeArea(const Lut3D& lut, int width, int height) {
+    ProbeArea a;
+    auto edge = [](double f, int size) { return int(std::lround(std::min(1.0, std::max(0.0, f)) * size)); };
+    a.x0 = edge(lut.probeRect[0], width);
+    a.y0 = edge(lut.probeRect[1], height);
+    a.x1 = std::max(a.x0 + 1, edge(lut.probeRect[2], width));
+    a.y1 = std::max(a.y0 + 1, edge(lut.probeRect[3], height));
+    if (lut.probeCols > 0 && lut.probeRows > 0) {
+        a.cols = lut.probeCols;
+        a.rows = lut.probeRows;
+    } else {
+        probeGrid(lut.probe, a.x1 - a.x0, a.y1 - a.y0, &a.cols, &a.rows);
     }
+    return a;
+}
+
+void probeColour(int n, const ProbeArea& a, int x, int y, float out[3]) {
+    out[0] = out[1] = out[2] = 0.f;
+    if (x < a.x0 || x >= a.x1 || y < a.y0 || y >= a.y1) return;
+    const int col = int((long long)(x - a.x0) * a.cols / (a.x1 - a.x0));
+    const int row = int((long long)(y - a.y0) * a.rows / (a.y1 - a.y0));
+    const int idx = row * a.cols + col;
+    if (idx >= n * n * n) return;
     const float k = 1.f / float(n - 1);
     out[0] = float(idx % n) * k;
     out[1] = float(idx / n % n) * k;
     out[2] = float(idx / (n * n)) * k;
 }
 
-void fillProbe8(int n, const Image8& dst) {
-    int cols, rows;
-    probeGrid(n, dst.width, dst.height, &cols, &rows);
+void fillProbe8(int n, const ProbeArea& a, const Image8& dst) {
     const Offsets d_o = offsetsOf(dst.layout);
     parallelRows(dst.height, [&](int y0, int y1) {
         for (int y = y0; y < y1; y++) {
             uint8_t* dp = dst.data + y * dst.rowBytes;
             for (int x = 0; x < dst.width; x++, dp += 4) {
                 float c[3];
-                probeColour(n, cols, rows, dst.width, dst.height, x, y, c);
+                probeColour(n, a, x, y, c);
                 dp[d_o.r] = to8(c[0]);
                 dp[d_o.g] = to8(c[1]);
                 dp[d_o.b] = to8(c[2]);
@@ -286,16 +299,14 @@ void fillProbe8(int n, const Image8& dst) {
     });
 }
 
-void fillProbeF(int n, const ImageF& dst) {
-    int cols, rows;
-    probeGrid(n, dst.width, dst.height, &cols, &rows);
+void fillProbeF(int n, const ProbeArea& a, const ImageF& dst) {
     const Offsets d_o = offsetsOf(dst.layout);
     parallelRows(dst.height, [&](int y0, int y1) {
         for (int y = y0; y < y1; y++) {
             float* dp = reinterpret_cast<float*>(reinterpret_cast<char*>(dst.data) + y * dst.rowBytes);
             for (int x = 0; x < dst.width; x++, dp += 4) {
                 float c[3];
-                probeColour(n, cols, rows, dst.width, dst.height, x, y, c);
+                probeColour(n, a, x, y, c);
                 dp[d_o.r] = c[0];
                 dp[d_o.g] = c[1];
                 dp[d_o.b] = c[2];
@@ -336,9 +347,19 @@ bool parseEmbeddedText(const std::string& text, Lut3D& out, std::string* error) 
     if (text.compare(0, 6, "PMLUT0") == 0) return true;
     const std::string head = text.substr(0, 96);
     if (text.compare(0, 6, "PMLUTP") == 0) {
-        int n = 0;
-        if (std::sscanf(head.c_str(), "PMLUTP %d", &n) != 1 || n < 2 || n > 64) return fail("bad calibration pattern size");
+        int n = 0, cols = 0, rows = 0;
+        long r[4] = {};
+        const int got = std::sscanf(head.c_str(), "PMLUTP %d %d %d %ld %ld %ld %ld", &n, &cols, &rows, &r[0], &r[1], &r[2], &r[3]);
+        if (got < 1 || n < 2 || n > 64) return fail("bad calibration pattern size");
         out.probe = n;
+        if (got == 1) return true;
+        // Integers, so no locale can misread a decimal point.
+        const bool rectOk = got == 7 && r[0] >= 0 && r[1] >= 0 && r[0] < r[2] && r[1] < r[3] && r[2] <= 1000000 && r[3] <= 1000000;
+        if (!rectOk || cols < 1 || rows < 1 || (long long)cols * rows < (long long)n * n * n || (long long)cols * rows > 4000000)
+            return fail("bad calibration pattern area");
+        out.probeCols = cols;
+        out.probeRows = rows;
+        for (int i = 0; i < 4; i++) out.probeRect[i] = r[i] / 1e6;
         return true;
     }
     int size = 0;

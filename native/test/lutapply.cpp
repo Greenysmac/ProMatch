@@ -53,7 +53,23 @@ static int checkEmbedded(const char* cubePath, const char* textPath) {
     const bool noneOk = !pm::embeddedLut(none.data(), none.size());
     const std::vector<uint8_t> pat = pm::toUtf16("PMLUTP 17");
     auto probe = pm::embeddedLut(pat.data(), pat.size());
-    const bool patternOk = probe && probe->probe == 17 && probe->size == 0;
+    bool patternOk = probe && probe->probe == 17 && probe->size == 0 && probe->probeCols == 0;
+    // Over part of the frame, with its own grid: the area in pixels, and bad areas refused.
+    pm::Lut3D part;
+    if (pm::parseEmbeddedText("PMLUTP 17 53 93 250000 0 750000 1000000", part)) {
+        const pm::ProbeArea a = pm::probeArea(part, 3840, 2160);
+        float c[3];
+        pm::probeColour(17, a, 959, 100, c);
+        const bool black = c[0] == 0 && c[1] == 0 && c[2] == 0;
+        pm::probeColour(17, a, 960 + 1920 / 53 + 2, 3, c);  // second cell: r = 1/16
+        patternOk = patternOk && a.cols == 53 && a.rows == 93 && a.x0 == 960 && a.x1 == 2880 && a.y0 == 0 && a.y1 == 2160 &&
+                    black && std::fabs(c[0] - 1.f / 16) < 1e-6f && c[1] == 0 && c[2] == 0;
+    } else {
+        patternOk = false;
+    }
+    pm::Lut3D bad;
+    patternOk = patternOk && !pm::parseEmbeddedText("PMLUTP 17 10 10 0 0 1000000 1000000", bad) &&
+                !pm::parseEmbeddedText("PMLUTP 17 53 93 500000 0 400000 1000000", bad);
     const char junk[] = "<Lumetri>not ours</Lumetri>";
     const bool junkOk = !pm::embeddedLut(junk, sizeof(junk) - 1);
     std::printf("{\"size\":%d,\"id\":%ld,\"name\":\"%s\",\"paramBytes\":%zu,\"maxDiff255\":%.5f,\"reencodedDiff255\":%.5f,"

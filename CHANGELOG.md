@@ -3,6 +3,37 @@
 Versions follow `major.minor.patch`. The release tag is `v` + the version (for example `v0.2.0`);
 the update check compares it with the version the panel was built with.
 
+## Unreleased
+
+- **Colour-managed sequences with reframed clips.** Calibration (ACEScct and other
+  scene-referred working spaces) works when the clip isn't the sequence's size or is moved
+  and scaled with Motion, for example 16:9 footage in a 9:16 sequence. It used to fail with
+  "the captured frame isn't the test pattern". The test pattern now goes in the part of the
+  clip that shows on screen (effect build 12: restart Premiere after updating).
+- Captures of a clip that Motion shows only part of (16:9 footage in a 9:16 sequence, scaled
+  up or cropped) are of its whole frame: fitted into the sequence frame for the capture, put
+  back straight after, and cropped to the clip. More of the scene to match on. A clip with
+  keyframed Motion is captured as framed.
+- The effect tells Premiere its GPU render keeps up with playback, as the SDK recommends, and
+  `effect.log` records the GPU filter's registration, its frame layout and any GPU render that
+  can't run, so a switch to CPU rendering can be traced.
+- **Rec. 709 sequences with linear compositing are calibrated.** In Premiere 27 the effect
+  gets log footage (S-Log3) still as log there, and the colour management turns it into Rec. 709
+  after ProMatch, so the applied match looked visibly off from the panel's After view. Apply now
+  measures that, as it does for ACEScct, and builds the LUT for it (measured: the Program Monitor
+  then matches the After view to 0.6/255). A sequence where the effect sees the displayed picture
+  keeps the plain LUT.
+- **Premiere 27.** The panel knows which Premiere it's in. In 27, a target clip with a Color
+  Mode Effect gets a warning in the Log at capture: if it holds a grade, Premiere applies it
+  after ProMatch, so toggle the clip's operations off while capturing and applying. The Apply
+  result warns only for the clips that still have one after the Apply: Premiere can leave an
+  empty one on a clip (it went once ProMatch was added), and scripting can't see its operations. Without the
+  ProMatch effect, Apply explains a Color Mode Clip LUT instead of the retired Lumetri panel.
+- **"Host script failed".** The panel's script keeps working when another panel has replaced
+  Premiere's shared `JSON` with a broken copy. When it still can't connect, click the red label
+  to try again, and the Log adds a `host.jsx diagnostics` line saying why. Troubleshooting steps
+  are in docs/INSTALL.md.
+
 ## 0.2.0
 
 - Captures are of one camera as shot: the selected clip under the playhead (else the top one),

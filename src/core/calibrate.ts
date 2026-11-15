@@ -12,6 +12,12 @@
  * gives D, working → display, as an n³ table. The LUT the effect then needs
  * is D⁻¹ ∘ match ∘ D: show what the camera recorded, match it, and find the
  * working-space value that displays as the matched colour.
+ *
+ * Premiere hands the effect the clip's own frame, which Motion then scales
+ * and moves onto the sequence's. A clip that isn't the sequence's size, or is
+ * reframed (16:9 footage in a 9:16 sequence), shows only part of its frame,
+ * so the pattern goes in that part (probePlacement) and is read from where it
+ * lands on screen.
  */
 import type { Vec3 } from './color.ts'
 import { solve } from './linalg.ts'
@@ -21,8 +27,118 @@ import type { RgbaImage } from './sample.ts'
 /** Grid size of the pattern: 17³ = 4913 colours, ~20 px cells at 1080p. */
 export const PROBE_N = 17
 
-/** The effect's LUT text that draws the pattern instead of the picture. */
-export const probeText = (n = PROBE_N) => `PMLUTP ${n}`
+/** A rectangle as fractions of a frame's width and height. */
+export interface Rect {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+}
+
+const FULL: Rect = { x0: 0, y0: 0, x1: 1, y1: 1 }
+
+/**
+ * Where the pattern goes: a cols × rows grid over `clip` (part of the
+ * effect's frame), which shows on screen as `screen` (part of the captured
+ * sequence frame).
+ */
+export interface ProbePlacement {
+  cols: number
+  rows: number
+  clip: Rect
+  screen: Rect
+}
+
+/**
+ * The effect's LUT text that draws the pattern instead of the picture: over
+ * the whole frame, or as placed (effect build 12+; the corners in millionths,
+ * so no locale can misread them).
+ */
+export function probeText(n = PROBE_N, place?: ProbePlacement): string {
+  if (!place) return `PMLUTP ${n}`
+  const m = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 1e6)
+  const r = place.clip
+  return `PMLUTP ${n} ${place.cols} ${place.rows} ${m(r.x0)} ${m(r.y0)} ${m(r.x1)} ${m(r.y1)}`
+}
+
+/**
+ * How the clip at the playhead sits in the sequence frame, as Premiere
+ * reports it (PM_clipGeometry in jsx/host.jsx). Sizes in pixels with their
+ * pixel aspect. Motion's Position is a fraction of the sequence frame and
+ * Anchor Point of the clip's; Scale and Scale Width in percent (Scale is
+ * the height's when Uniform Scale is off); Rotation in degrees.
+ */
+export interface ClipGeometry {
+  sequence: { width: number; height: number; par: number }
+  clip: { name: string; track: number } | null
+  media: { width: number; height: number; par: number } | null
+  motion: {
+    position: [number, number]
+    scale: number
+    scaleWidth: number
+    uniform: boolean
+    rotation: number
+    anchor: [number, number]
+    /** Motion's crop (Premiere 26+): left, top, right, bottom in percent of the clip's frame. */
+    crop?: [number, number, number, number]
+  } | null
+}
+
+/**
+ * Where to draw the pattern so that it fills the part of the sequence frame
+ * the clip covers, with square cells on screen. `scaleToFrame`: the clip has
+ * Scale to Frame Size on, so Premiere first fits its frame to the sequence's
+ * and Motion scales that (scripting can't tell, so the panel tries both).
+ * Without the clip's size or Motion, the whole frame, as before. Throws when
+ * the pattern can't be shown: the clip is rotated, off screen or too small.
+ */
+export function probePlacement(g: ClipGeometry, n = PROBE_N, scaleToFrame = false): ProbePlacement | undefined {
+  const sq = g.sequence
+  const md = g.media
+  const m = g.motion
+  if (!md || !m || ![m.position[0], m.position[1], m.anchor[0], m.anchor[1], m.scale, m.rotation].every(Number.isFinite)) return undefined
+  // Display units: pixels times pixel aspect, the space Motion works in.
+  const Sw = sq.width * sq.par
+  const Sh = sq.height
+  let Cw = md.width * md.par
+  let Ch = md.height
+  if (scaleToFrame) {
+    const f = Math.min(Sw / Cw, Sh / Ch)
+    Cw *= f
+    Ch *= f
+  }
+  const turn = ((m.rotation % 360) + 360) % 360
+  if (Math.min(turn, 360 - turn) > 0.01) {
+    throw new Error(`the clip is rotated ${m.rotation}°. Set its Motion > Rotation to 0 while calibrating, then put it back`)
+  }
+  const sy = m.scale / 100
+  const sx = (m.uniform ? m.scale : m.scaleWidth) / 100
+  if (!(sx > 0 && sy > 0)) throw new Error('the clip is scaled to nothing (Motion > Scale is 0)')
+  // The clip's frame on screen, and the part of it inside the sequence frame
+  // and not cropped away.
+  const cx0 = m.position[0] * Sw - sx * m.anchor[0] * Cw
+  const cy0 = m.position[1] * Sh - sy * m.anchor[1] * Ch
+  const cw = sx * Cw
+  const ch = sy * Ch
+  const [cl, ct, cr, cb] = (m.crop ?? [0, 0, 0, 0]).map((v) => (Number.isFinite(v) ? Math.min(100, Math.max(0, v)) / 100 : 0))
+  const vx0 = Math.max(0, cx0 + cl * cw)
+  const vy0 = Math.max(0, cy0 + ct * ch)
+  const vx1 = Math.min(Sw, cx0 + (1 - cr) * cw)
+  const vy1 = Math.min(Sh, cy0 + (1 - cb) * ch)
+  if (vx1 <= vx0 || vy1 <= vy0) throw new Error('the clip at the playhead is outside the frame (check its Motion > Position)')
+  const screen: Rect = { x0: vx0 / Sw, y0: vy0 / Sh, x1: vx1 / Sw, y1: vy1 / Sh }
+  const clip: Rect = { x0: (vx0 - cx0) / cw, y0: (vy0 - cy0) / ch, x1: (vx1 - cx0) / cw, y1: (vy1 - cy0) / ch }
+  const wPx = (screen.x1 - screen.x0) * sq.width
+  const hPx = (screen.y1 - screen.y0) * sq.height
+  const { cols, rows } = probeLayout(n, wPx, hPx)
+  // Cells must survive scaling and compression: a few pixels on screen and
+  // in the clip's frame (which, with Scale to Frame Size, is the fitted size).
+  const frameW = scaleToFrame ? Cw / md.par : md.width
+  const frameH = scaleToFrame ? Ch : md.height
+  const cell = Math.min(wPx / cols, hPx / rows, ((clip.x1 - clip.x0) * frameW) / cols, ((clip.y1 - clip.y0) * frameH) / rows)
+  if (cell < 4) throw new Error(`the clip covers too little of the frame to show the test pattern (cells of ${cell.toFixed(1)} px). Scale it up to fill the frame while calibrating`)
+  return { cols, rows, clip, screen }
+}
 
 /**
  * The pattern's grid: n³ cells, close to square, over the whole frame. Same
@@ -72,14 +188,20 @@ function monotone(n: number, table: number[]): number {
 }
 
 /**
- * Read the pattern back from a captured frame. Each cell is averaged over its
- * middle half, away from edges that scaling or compression blur. Both
- * vertical orientations are tried; the one whose brightness follows the
- * drawn colours wins (see `fit`). Throws when neither does: the frame isn't the
- * pattern, or it was moved, scaled or blended on its way to the screen.
+ * Read the pattern back from a captured frame, from where `place` puts it on
+ * screen (else the whole frame). Each cell is averaged over its middle half,
+ * away from edges that scaling or compression blur. Both vertical
+ * orientations are tried; the one whose brightness follows the drawn colours
+ * wins (see `fit`). Throws when neither does: the frame isn't the pattern, or
+ * something covers it or moved it on its way to the screen.
  */
-export function readProbe(img: RgbaImage, n = PROBE_N): Calibration {
-  const { cols, rows } = probeLayout(n, img.width, img.height)
+export function readProbe(img: RgbaImage, n = PROBE_N, place?: ProbePlacement): Calibration {
+  const area = place?.screen ?? FULL
+  const { cols, rows } = place ?? probeLayout(n, img.width, img.height)
+  const ax = area.x0 * img.width
+  const ay = area.y0 * img.height
+  const aw = (area.x1 - area.x0) * img.width
+  const ah = (area.y1 - area.y0) * img.height
   const count = n * n * n
   let best: Calibration | null = null
   for (const flipped of [false, true]) {
@@ -87,11 +209,14 @@ export function readProbe(img: RgbaImage, n = PROBE_N): Calibration {
     for (let idx = 0; idx < count; idx++) {
       const col = idx % cols
       const row = Math.floor(idx / cols)
-      const x0 = Math.floor(((col + 0.25) * img.width) / cols)
-      const x1 = Math.max(x0 + 1, Math.ceil(((col + 0.75) * img.width) / cols))
-      let y0 = Math.floor(((row + 0.25) * img.height) / rows)
-      let y1 = Math.max(y0 + 1, Math.ceil(((row + 0.75) * img.height) / rows))
-      if (flipped) [y0, y1] = [img.height - y1, img.height - y0]
+      const x0 = Math.floor(ax + ((col + 0.25) * aw) / cols)
+      const x1 = Math.max(x0 + 1, Math.ceil(ax + ((col + 0.75) * aw) / cols))
+      let y0 = Math.floor(ay + ((row + 0.25) * ah) / rows)
+      let y1 = Math.max(y0 + 1, Math.ceil(ay + ((row + 0.75) * ah) / rows))
+      // Mirrored within the area (the whole frame, when there's no placement).
+      if (flipped) [y0, y1] = [Math.round(2 * ay + ah) - y1, Math.round(2 * ay + ah) - y0]
+      y0 = Math.max(0, y0)
+      y1 = Math.min(img.height, Math.max(y0 + 1, y1))
       const sum: Vec3 = [0, 0, 0]
       let k = 0
       for (let y = y0; y < y1; y++) {
@@ -111,7 +236,7 @@ export function readProbe(img: RgbaImage, n = PROBE_N): Calibration {
   }
   if (!best || best.fit < 0.95) {
     throw new Error(
-      `the captured frame isn't the test pattern (match ${(best?.fit ?? 0).toFixed(2)}). Put the playhead over the target clip, with no other clip covering it, and Motion at its defaults`,
+      `the captured frame isn't the test pattern (match ${(best?.fit ?? 0).toFixed(2)}). Put the playhead over the target clip, with nothing on the tracks above it (titles, captions, adjustment layers) and no effect after ProMatch that moves or crops it`,
     )
   }
   return best
@@ -255,7 +380,31 @@ export function setupName(c: ColourSetup): string {
   return on.length ? `${c.working.name} (${on.join(', ')})` : c.working.name
 }
 
-/** Does this working colour space need calibrating? Plain Rec.709 doesn't: effects see the display picture there (spikes P7, P10). */
-export function needsCalibration(working: { name: string; isSceneReferred: boolean }): boolean {
-  return working.isSceneReferred || !/^Rec\.? ?709$/i.test(working.name.trim())
+/**
+ * Does this setup need calibrating? Plain Rec.709 doesn't: effects see the
+ * display picture there (spikes P7, P10). With linear compositing on they
+ * may not (Premiere 27, S-Log3 media in a Rec.709 sequence: the match landed
+ * visibly off), so that is measured too; if it measures as the display
+ * picture after all, `isIdentity` keeps the plain LUT.
+ */
+export function needsCalibration(c: { working: { name: string; isSceneReferred: boolean }; linearComposite?: boolean }): boolean {
+  return c.working.isSceneReferred || !!c.linearComposite || !/^Rec\.? ?709$/i.test(c.working.name.trim())
+}
+
+/**
+ * Does Premiere show what the effect outputs unchanged? Within capture noise:
+ * 8-bit frames, cells averaged, and the CPU path's 0.4/255 shift (P7).
+ */
+export function isIdentity(cal: Calibration, meanTol = 1 / 255, maxTol = 4 / 255): boolean {
+  const count = cal.n ** 3
+  let sum = 0
+  for (let idx = 0; idx < count; idx++) {
+    const want = probeColour(cal.n, idx)
+    for (let c = 0; c < 3; c++) {
+      const d = Math.abs(cal.table[idx * 3 + c] - want[c])
+      if (d > maxTol) return false
+      sum += d
+    }
+  }
+  return sum / (count * 3) <= meanTol
 }

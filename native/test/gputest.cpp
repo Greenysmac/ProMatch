@@ -70,17 +70,30 @@ static std::vector<float> cpuRef(const pm::Lut3D& lut, std::vector<float> px, in
 
 // The calibration pattern as the CPU effect draws it, for the same frame size.
 static const int kProbe = 17;
+// Over part of the frame, as for a clip reframed in a vertical sequence: the
+// kernels must put each cell where the CPU does, and leave black around it.
+static pm::Lut3D probeLut() {
+    pm::Lut3D p;
+    pm::parseEmbeddedText("PMLUTP 17 53 93 300000 20000 650000 990000", p);
+    return p;
+}
 static std::vector<float> probeRef(int w, int h, bool half) {
     std::vector<float> px(size_t(w) * h * 4);
-    pm::fillProbeF(kProbe, pm::ImageF{px.data(), w, h, long(w) * 16, pm::Layout::BGRA});
+    pm::fillProbeF(kProbe, pm::probeArea(probeLut(), w, h), pm::ImageF{px.data(), w, h, long(w) * 16, pm::Layout::BGRA});
     if (half)
         for (auto& v : px) v = fromHalf(toHalf(v));
     return px;
 }
 
 static LutKernelArgs probeArgs(LutKernelArgs a) {
+    const pm::ProbeArea pa = pm::probeArea(probeLut(), a.width, a.height);
     a.probe = kProbe;
-    pm::probeGrid(kProbe, a.width, a.height, &a.probeCols, &a.probeRows);
+    a.probeCols = pa.cols;
+    a.probeRows = pa.rows;
+    a.probeX0 = pa.x0;
+    a.probeY0 = pa.y0;
+    a.probeX1 = pa.x1;
+    a.probeY1 = pa.y1;
     return a;
 }
 

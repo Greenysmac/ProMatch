@@ -161,6 +161,10 @@ inline void SetClArgs(const OpenClApi& cl, cl_kernel k, cl_mem src, cl_mem dst, 
     cl.SetKernelArg(k, i++, sizeof(int), &a.probe);
     cl.SetKernelArg(k, i++, sizeof(int), &a.probeCols);
     cl.SetKernelArg(k, i++, sizeof(int), &a.probeRows);
+    cl.SetKernelArg(k, i++, sizeof(int), &a.probeX0);
+    cl.SetKernelArg(k, i++, sizeof(int), &a.probeY0);
+    cl.SetKernelArg(k, i++, sizeof(int), &a.probeX1);
+    cl.SetKernelArg(k, i++, sizeof(int), &a.probeY1);
 }
 
 // Launch the CUDA kernel (caller has the context current).
@@ -168,7 +172,7 @@ inline CUresult LaunchCuda(const CudaApi& cu, CUfunction f, CUstream stream, CUd
                            CUdeviceptr lut, LutKernelArgs a) {
     void* args[] = {&src, &a.srcPitch, &dst, &a.dstPitch, &a.is16f, &a.width, &a.height, &lut, &a.size,
                     &a.dmin[0], &a.dmin[1], &a.dmin[2], &a.dmax[0], &a.dmax[1], &a.dmax[2], &a.amount,
-                    &a.probe,   &a.probeCols, &a.probeRows};
+                    &a.probe,   &a.probeCols, &a.probeRows, &a.probeX0, &a.probeY0, &a.probeX1, &a.probeY1};
     return cu.LaunchKernel(f, (a.width + 15) / 16, (a.height + 15) / 16, 1, 16, 16, 1, 0, stream, args, nullptr);
 }
 

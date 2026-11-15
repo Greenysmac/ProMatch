@@ -23,7 +23,7 @@ import {
   strideFor,
 } from '../core/scopes.ts'
 import { suggestFromMatches } from '../core/geo-auto.ts'
-import { type Calibration, type ColourSetup, needsCalibration, probeText, readProbe, setupKey, setupName, workingLut } from '../core/calibrate.ts'
+import { type Calibration, type ClipGeometry, type ColourSetup, PROBE_N, type ProbePlacement, isIdentity, needsCalibration, probePlacement, probeText, readProbe, setupKey, setupName, workingLut } from '../core/calibrate.ts'
 import { type Lut3D, applyLutToPixels, bakeLut, toCube, toEmbeddedText } from '../core/lut.ts'
 import {
   DEFAULT_OPTIONS,
@@ -217,6 +217,57 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
 }
 
+/**
+ * Crop a captured PNG, in place, to `rect` (fractions of the frame): the
+ * clip's own frame within the sequence frame. A pixel in from each edge, off
+ * the blend with whatever is around it. Left alone when it is the whole frame.
+ */
+async function cropCapture(file: string, rect: { x0: number; y0: number; x1: number; y1: number }, width: number, height: number): Promise<void> {
+  const img = await new Promise<HTMLImageElement>((res, rej) => {
+    const i = new Image()
+    i.onload = () => res(i)
+    i.onerror = () => rej(new Error(`could not read the capture ${file}`))
+    i.src = node.readDataUrl(file)
+  })
+  const W = img.naturalWidth || width
+  const H = img.naturalHeight || height
+  let x0 = Math.ceil(rect.x0 * W)
+  let y0 = Math.ceil(rect.y0 * H)
+  let x1 = Math.floor(rect.x1 * W)
+  let y1 = Math.floor(rect.y1 * H)
+  if (x0 <= 0 && y0 <= 0 && x1 >= W && y1 >= H) return
+  if (x0 > 0) x0++
+  if (y0 > 0) y0++
+  if (x1 < W) x1--
+  if (y1 < H) y1--
+  x0 = Math.max(0, x0)
+  y0 = Math.max(0, y0)
+  x1 = Math.min(W, x1)
+  y1 = Math.min(H, y1)
+  if (x1 - x0 < 16 || y1 - y0 < 16) return
+  const c = document.createElement('canvas')
+  c.width = x1 - x0
+  c.height = y1 - y0
+  c.getContext('2d')!.drawImage(img, x0, y0, c.width, c.height, 0, 0, c.width, c.height)
+  const png = c.toDataURL('image/png').split(',')[1]
+  const bin = atob(png)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  node.writeBytes(file, bytes.buffer)
+}
+
+/** For the Log: the clip at the playhead, how it sits in the frame, and where the pattern goes. */
+function describePlacement(g: ClipGeometry, p: ProbePlacement): string {
+  const pct = (v: number) => `${Math.round(v * 100)}%`
+  const m = g.motion!
+  const scale = m.uniform ? `${m.scale.toFixed(1)}%` : `${m.scaleWidth.toFixed(1)}% × ${m.scale.toFixed(1)}%`
+  const what = `${g.clip?.name ?? 'Clip'} (${g.media!.width}×${g.media!.height}) in ${g.sequence.width}×${g.sequence.height}, Scale ${scale}, Position ${pct(m.position[0])} ${pct(m.position[1])}`
+  const c = p.clip
+  const s = p.screen
+  const whole = (r: typeof c) => r.x0 < 1e-6 && r.y0 < 1e-6 && r.x1 > 1 - 1e-6 && r.y1 > 1 - 1e-6
+  return `${what}: pattern ${p.cols}×${p.rows} over ${whole(c) ? 'its whole frame' : `${pct(c.x1 - c.x0)} × ${pct(c.y1 - c.y0)} of its frame`}, ${whole(s) ? 'filling the screen' : `covering ${pct(s.x1 - s.x0)} × ${pct(s.y1 - s.y0)} of the screen`}.`
+}
+
 export class App {
   private frames: Record<Role, Frame | null> = { source: null, target: null }
   private views!: Record<Role, FrameView>
@@ -241,6 +292,8 @@ export class App {
   private detail: Record<Role, { lut: Lut3D; canvas: HTMLCanvasElement } | null> = { source: null, target: null }
   private detailTimer: Record<Role, ReturnType<typeof setTimeout> | null> = { source: null, target: null }
   private detailCanvas: Record<Role, HTMLCanvasElement | null> = { source: null, target: null }
+  /** Premiere's major version once connected (27 = Color Mode, Lumetri panel retired), else 0. */
+  private premiere = 0
   private lutSize = 33
   private lutName = 'ProMatch'
   private lutNameAuto = true
@@ -667,6 +720,7 @@ export class App {
         }
       }
       if (tries) log(`Connected after waiting ${tries} time(s) for Premiere to finish starting.`)
+      this.premiere = parseInt(String(info.version), 10) || 0
       status.textContent = `${info.app} ${info.version}`
       status.title = `Connected to ${info.app} ${info.version}${info.sequence ? ` — sequence "${info.sequence}"` : ''}`
       status.className = 'status ok'
@@ -676,10 +730,19 @@ export class App {
       void this.refreshProjectGamma()
     } catch (e) {
       status.textContent = 'Host script failed'
-      status.title = 'jsx/host.jsx did not load — open the Log'
+      status.title = 'jsx/host.jsx did not load — open the Log. Click to try again.'
       status.className = 'status err'
+      // Retry without restarting Premiere (say once a project has opened):
+      // reloading reruns the whole start-up, buttons included.
+      status.style.cursor = 'pointer'
+      status.addEventListener('click', () => window.location.reload(), { once: true })
       disable('host.jsx did not load — see Log')
       log(`host.jsx: ${(e as Error).message}`, 'error')
+      // So a user's copied Log says why, not only that it failed.
+      void host.diagnose().then(
+        (d) => log(`host.jsx diagnostics: ${d}`, 'error'),
+        (d) => log(`host.jsx diagnostics failed: ${(d as Error).message}`, 'error'),
+      )
     }
   }
 
@@ -743,6 +806,7 @@ Captured in ${setupName(colour)} colour management` : ''}`
     const raw = this.unconverted()
     if (!this.restoring && raw) log(raw.replace(/<[^>]+>/g, ''), 'warn')
     if (!this.restoring && clip?.vignette) log(`The ${role} has a Lumetri vignette (amount ${clip.vignette.toFixed(2)}): see the hint.`, 'warn')
+    if (!this.restoring && role === 'target' && clip?.colorMode) log(this.colourModeGraded([clip.name]).replace(/<[^>]+>/g, ''), 'warn')
     $('[data-empty]', el).hidden = true
     this.scheduleUpdate()
   }
@@ -762,7 +826,28 @@ Captured in ${setupName(colour)} colour management` : ''}`
     return (
       `<b>The ${bareRole} is still log.</b> ${escapeHtml(has.name)} has ${escapeHtml(has.effects!.join(', '))} on it, ` +
       `${escapeHtml(bare.name)} has nothing, and both are ${escapeHtml(bare.media!.name)}. Give ${escapeHtml(bare.name)} the same conversion ` +
-      `(e.g. the same LUT in Lumetri), then capture the ${bareRole} again: ProMatch matches two cameras, it can't do the log conversion as well.`
+      `(${this.premiere >= 27 ? 'the same LUT, or the same colour setup' : 'e.g. the same LUT in Lumetri'}), then capture the ${bareRole} again: ProMatch matches two cameras, it can't do the log conversion as well.`
+    )
+  }
+
+  /**
+   * Clips (`names`) that may be graded in Premiere 27's Color Mode. A grade
+   * renders after ProMatch (Effect Controls lists it last, and it can't be
+   * moved), but the capture already includes it: the match would map the
+   * graded target and then be graded again. Match first, grade on top.
+   *
+   * Scripting (DOM and QE) sees the Color Mode Effect but not its operations,
+   * nor whether they are toggled off (tested 27.0.0), and Premiere can leave
+   * an empty one on a clip. So it is said as "may", in the Log at capture and
+   * in the Apply result for the clips that still have one then, never as the
+   * hint, which would then hide the point hints for good.
+   */
+  private colourModeGraded(names: string[]): string {
+    const list = names.map(escapeHtml).join(', ')
+    return (
+      `<b>${list} ${names.length === 1 ? 'has' : 'have'} a Color Mode Effect.</b> If it holds a grade, Premiere applies it after ProMatch, so if it was on when you captured, the match gets graded twice. ` +
+      `In Color mode, right-click each clip operation ▸ <b>Toggle Operation</b>, capture the target again and apply, then toggle them back on: the grade then sits on top of the match. ` +
+      `No operations, or already off when you captured? Then all is well (Premiere doesn't tell ProMatch, and can keep an empty one).`
     )
   }
 
@@ -801,6 +886,9 @@ Captured in ${setupName(colour)} colour management` : ''}`
       const colour = await host.sequenceColour().catch(() => null)
       void this.refreshProjectGamma()
       const file = await node.waitForFile([`${base}.png`, base])
+      // Just the clip: the bars around a clip fitted whole show the tracks below.
+      const whole = info.clip?.whole
+      if (whole) await cropCapture(file, whole.rect, info.width, info.height)
       const who = info.clip ? info.clip.name : info.sequence
       const label = `${who} @ ${info.timecode}${info.clip?.multicam ? ' (multicam)' : ''}`
       await this.loadImage(role, node.readDataUrl(file), label, file, colour, info.clip)
@@ -861,6 +949,9 @@ Captured in ${setupName(colour)} colour management` : ''}`
   private leftOut(clip: host.CaptureClip | null): string {
     if (!clip?.raw) return ''
     const parts: string[] = []
+    if (clip.whole?.reframed) parts.push(`the whole ${clip.whole.width}×${clip.whole.height} frame, fitted for the capture`)
+    if (clip.keyframed) parts.push('Motion is keyframed, so as framed')
+    if (clip.fitError) parts.push(`as framed (couldn't fit the whole clip: ${clip.fitError})`)
     if (clip.hidden?.length) parts.push(`without ${clip.hidden.map((t) => `V${t}`).join(', ')} above it`)
     if (clip.shown) parts.push(`V${clip.track} shown for it`)
     if (clip.bypassed) parts.push(`its ProMatch off`)
@@ -1659,26 +1750,70 @@ Captured in ${setupName(colour)} colour management` : ''}`
 
   /**
    * Measure what Premiere does after the effect in this sequence
-   * (calibrate.ts): the effect on the target clips draws the test pattern,
-   * the Program Monitor frame is captured and read. The clips keep showing
-   * the pattern until the caller applies the real LUT.
+   * (calibrate.ts): the effect on the target clips draws the test pattern
+   * (the caller has set it, placed as `place`), the Program Monitor frame is
+   * captured and read. If that fails and the clip may have Scale to Frame
+   * Size on (scripting can't tell), the pattern is placed for that and read
+   * again. The clips keep showing the pattern until the caller applies the
+   * real LUT.
    */
-  private async calibrate(): Promise<Calibration> {
+  private async calibrate(id: number, geometry: ClipGeometry | null, place: ProbePlacement | undefined): Promise<Calibration> {
+    try {
+      return await this.readPattern(place)
+    } catch (e) {
+      let fitted: ProbePlacement | undefined
+      try {
+        fitted = geometry && place ? probePlacement(geometry, PROBE_N, true) : undefined
+      } catch {
+        fitted = undefined
+      }
+      if (fitted && place && probeText(PROBE_N, fitted) !== probeText(PROBE_N, place)) {
+        log(`Test pattern not found (${(e as Error).message.split('.')[0]}); trying again as for a clip with Scale to Frame Size on…`)
+        await host.applyMatch(id, probeText(PROBE_N, fitted))
+        try {
+          return await this.readPattern(fitted)
+        } catch {
+          // Report the first: it's the likelier setup.
+        }
+      }
+      throw new Error((e as Error).message + this.effectBuildHint(place))
+    }
+  }
+
+  private async readPattern(place: ProbePlacement | undefined): Promise<Calibration> {
     const base = node.join(node.capturesDir(), `calibration-${Date.now()}`)
     await host.captureFrame(base, false)
     const file = await node.waitForFile([`${base}.png`, base])
     try {
-      return readProbe(await decodeImage(node.readDataUrl(file)))
+      return readProbe(await decodeImage(node.readDataUrl(file)), PROBE_N, place)
     } finally {
       node.remove(file)
     }
   }
 
   /**
+   * A placed pattern needs effect build 12; an older one draws it over the
+   * whole frame and the read fails. Premiere loads the effect at start-up, so
+   * after an update it runs the old one until restarted. The effect logs its
+   * build when it loads (native ProMatch.cpp GlobalSetup).
+   */
+  private effectBuildHint(place: ProbePlacement | undefined): string {
+    if (!place) return ''
+    try {
+      const builds = [...node.readText(node.join(node.dataDir(), 'effect.log')).matchAll(/GlobalSetup build (\d+)/g)]
+      const build = builds.length ? Number(builds[builds.length - 1][1]) : null
+      if (build !== null && build < 12) return `. Premiere is running ProMatch effect build ${build}, which can't place the pattern on a reframed clip: restart Premiere to load the updated effect`
+    } catch {
+      // No log: say nothing.
+    }
+    return ''
+  }
+
+  /**
    * One click: save the LUT beside the project, then put the effect on the
    * selected clips, or update the clips already using this match. In a
-   * scene-referred sequence (ACEScct...) the effect gets a LUT calibrated for
-   * its working space. Without the effect installed, fall back to the
+   * scene-referred sequence (ACEScct...), or with linear compositing, the
+   * effect gets a LUT calibrated for what it sees (needsCalibration). Without the effect installed, fall back to the
    * Lumetri Browse… steps.
    */
   private async apply(): Promise<void> {
@@ -1731,19 +1866,32 @@ Captured in ${setupName(colour)} colour management` : ''}`
       // Colour-managed sequence: the effect sees working-space values.
       let calNote: string | null = null
       let calWarn: string | null = null
-      if (colour && needsCalibration(colour.working)) {
+      if (colour && needsCalibration(colour)) {
         const key = setupKey(colour)
         const saved = this.calibrations()
         // Measured afresh after each new target capture (another clip, or
         // something after the effect may have changed), else reused.
         let cal: Calibration | null = this.recalibrate ? null : (saved[key] ?? null)
         if (!cal) {
+          // The pattern goes where the clip at the playhead shows on screen.
+          let geometry: ClipGeometry | null = null
+          let place: ProbePlacement | undefined
+          let placeError: Error | null = null
+          try {
+            geometry = await host.clipGeometry()
+            place = probePlacement(geometry)
+          } catch (e) {
+            if (geometry) placeError = e as Error
+            else log(`Could not read where the clip sits in the frame (${(e as Error).message}); showing the test pattern over its whole frame.`, 'warn')
+          }
           // Puts the effect on the clips too, showing the pattern for now.
-          const probe = await host.applyMatch(id, probeText())
+          const probe = await host.applyMatch(id, probeText(PROBE_N, place))
           if (!probe.missingEffect) {
             log(`Calibrating for ${setupName(colour)} (sequence ${colour.sequence}): reading the test pattern…`)
+            if (geometry && place) log(`  ${describePlacement(geometry, place)}`)
             try {
-              cal = await this.calibrate()
+              if (placeError) throw placeError
+              cal = await this.calibrate(id, geometry, place)
               saved[key] = cal
               node.writeTextAtomic(node.join(node.dataDir(), 'calibration.json'), JSON.stringify(saved))
               this.recalibrate = false
@@ -1757,10 +1905,15 @@ Captured in ${setupName(colour)} colour management` : ''}`
             }
           }
         }
+        if (cal && isIdentity(cal)) {
+          // Premiere shows the effect's output as it is: the plain LUT is exact.
+          log(`${setupName(colour)}: the effect sees the picture as displayed, so the LUT is applied as is.`)
+          cal = null
+        }
         if (cal) {
           const t0 = performance.now()
           effectText = toEmbeddedText(workingLut(cal, (c) => applyModel(this.model, c), this.lutSize), id, this.lutName)
-          calNote = `Calibrated for this sequence's <b>${escapeHtml(colour.working.name)}</b> working colour space.`
+          calNote = `Calibrated for this sequence's <b>${escapeHtml(setupName(colour))}</b> colour setup.`
           log(`Working-space LUT for ${colour.working.name} baked in ${Math.round(performance.now() - t0)} ms.`)
         }
       }
@@ -1770,8 +1923,9 @@ Captured in ${setupName(colour)} colour management` : ''}`
       // happens; 0.6 s later it relabels (tested).
       if (!r.missingEffect) setTimeout(() => void host.refreshEffectControls().catch(() => 0), 800)
       if (r.missingEffect) {
-        log('The ProMatch effect is not installed in Premiere: showing the Lumetri steps instead.', 'warn')
-        this.showLumetriSteps(p, folder.withProject, '<b>The ProMatch effect is not installed</b>, so apply it with Lumetri:')
+        const via = this.premiere >= 27 ? 'a Color Mode LUT operation' : 'Lumetri'
+        log(`The ProMatch effect is not installed in Premiere: showing the ${via} steps instead.`, 'warn')
+        this.showLumetriSteps(p, folder.withProject, `<b>The ProMatch effect is not installed</b>, so apply it with ${via}:`)
         return
       }
       if (!r.clips.length) throw new Error(`Premiere did not add the ProMatch effect${r.failed?.length ? ` to ${r.failed.join(', ')}` : ''}.`)
@@ -1798,6 +1952,9 @@ Captured in ${setupName(colour)} colour management` : ''}`
             warnings.push(`${escapeHtml(since.join(', '))} was added to ${escapeHtml(c.name)} after the target was captured, so the match lands on top of it. Capture the target again, or drag ProMatch above it in Effect Controls.`)
         }
       }
+      // As the clips are now, not as the target was at capture.
+      const graded = r.clips.filter((c) => c.colorMode).map((c) => c.name)
+      if (graded.length) warnings.push(this.colourModeGraded([...new Set(graded)]))
       if (r.failed?.length) warnings.push(`Could not reach: ${r.failed.map(escapeHtml).join(', ')}.`)
       if (!folder.withProject) warnings.push('<b>This project has never been saved</b>, so its LUT copy went to Documents.')
       this.showResult(
@@ -1822,8 +1979,12 @@ Captured in ${setupName(colour)} colour management` : ''}`
       `<div class="er-title">Saved ${escapeHtml(node.basename(p))}</div>` +
         `<p class="small"><code>${escapeHtml(p)}</code><br>${intro} Path copied to the clipboard.</p>` +
         '<ol class="steps">' +
-        "<li>Select the target camera's clip in the Timeline. No Lumetri yet? <button data-r=\"lumetri\">Add Lumetri</button></li>" +
-        '<li>Lumetri Color ▸ <b>Basic Correction</b> ▸ <b>Input LUT</b> ▸ <b>Browse…</b>, then paste the path.</li>' +
+        // Premiere 27 retired the Lumetri panel; Color Mode has LUT operations.
+        (this.premiere >= 27
+          ? "<li>Open the <b>Color</b> tab and select the target camera's clip.</li>" +
+            '<li>Under <b>Clip</b>, press <b>+</b> ▸ <b>Add Clip LUT</b>, then open its LUT list ▸ <b>Add LUT…</b> and paste the path.</li>'
+          : "<li>Select the target camera's clip in the Timeline. No Lumetri yet? <button data-r=\"lumetri\">Add Lumetri</button></li>" +
+            '<li>Lumetri Color ▸ <b>Basic Correction</b> ▸ <b>Input LUT</b> ▸ <b>Browse…</b>, then paste the path.</li>') +
         "<li><b>Multicam:</b> apply it to the angle's clip inside the multicam <i>source</i> sequence, so every cut to that camera inherits it.</li>" +
         '</ol>' +
         `<div class="button-row"><button data-r="reveal">Show in ${node.fileManager}</button><button data-r="copy">Copy path</button></div>`,

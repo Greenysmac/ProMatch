@@ -7,7 +7,7 @@
  * message instead of hanging.
  */
 
-import type { ColourSetup } from '../core/calibrate.ts'
+import type { ClipGeometry, ColourSetup } from '../core/calibrate.ts'
 
 interface CSInterfaceLike {
   evalScript(script: string, callback: (result: string) => void): void
@@ -34,6 +34,8 @@ export interface CaptureClip {
   effects?: string[]
   /** Lumetri vignette amount when one is switched on, else null. */
   vignette?: number | null
+  /** Has a Color Mode Effect (Premiere 27): rendered after ProMatch, opaque to scripting, and possibly empty. */
+  colorMode?: boolean
   /** The media's colour space; scene-referred = log or raw. */
   media?: { name: string; sceneReferred: boolean } | null
   /** Captured alone: its ProMatch effects at 0% and the tracks above it hidden for the capture. */
@@ -44,6 +46,16 @@ export interface CaptureClip {
   shown?: boolean
   /** ProMatch effects set to 0% for the capture. */
   bypassed?: number
+  /**
+   * Where the clip's whole frame is in the captured sequence frame (fractions),
+   * and the clip's frame size. `reframed`: Motion was changed for the capture
+   * to fit all of it (16:9 footage in a 9:16 sequence); the panel crops to it.
+   */
+  whole?: { rect: { x0: number; y0: number; x1: number; y1: number }; width: number; height: number; reframed: boolean }
+  /** Motion is keyframed, so the capture shows the clip as framed. */
+  keyframed?: boolean
+  /** Fitting the whole clip failed (why); the capture shows it as framed. */
+  fitError?: string
 }
 
 export interface SelectedClip {
@@ -113,6 +125,36 @@ export async function connect(): Promise<{ app: string; version: string; sequenc
   return call('PM_ping')
 }
 
+/**
+ * Why host.jsx is not answering, for the Log when connect() gives up. Each
+ * check is a separate evalScript of plain ES3, so one failing does not hide
+ * the others: is PM_ping defined, is the built-in JSON intact (_pmErr needs
+ * it, so a broken JSON throws outside the guard), the Premiere version, and
+ * the file's own load error with its line.
+ */
+export async function diagnose(): Promise<string> {
+  if (!cs) return 'not in CEP'
+  const ext = typeof SystemPath !== 'undefined' ? cs.getSystemPath(SystemPath.EXTENSION).replace(/\\/g, '/') : '?'
+  const jsx = `${ext}/jsx/host.jsx`
+  const checks: Array<[string, string]> = [
+    ['typeof PM_ping', 'typeof PM_ping'],
+    ['JSON', 'typeof JSON === "object" ? (typeof JSON.stringify) + "/" + (typeof JSON.parse) : typeof JSON'],
+    ['premiere', 'String(app.version)'],
+    ['engine', 'String($.engineName) + " " + String($.version)'],
+    ['file', `(function(){var f=new File(${JSON.stringify(jsx)});return f.exists?"exists, "+f.length+" bytes":"missing"})()`],
+    ['evalFile', `(function(){try{$.evalFile(${JSON.stringify(jsx)});return "ok, PM_ping is "+(typeof PM_ping)}catch(e){return "threw: "+e.message+" (line "+e.line+")"}})()`],
+  ]
+  const out: string[] = [`path ${jsx}`]
+  for (const [label, script] of checks) {
+    const raw = await Promise.race([
+      evalRaw(script),
+      new Promise<string>((r) => setTimeout(() => r('(no reply in 5 s)'), 5000)),
+    ])
+    out.push(`${label}: ${raw}`)
+  }
+  return out.join(' | ')
+}
+
 export const projectInfo = () => call<{ name: string | null; path: string | null }>('PM_projectInfo')
 /** The frame at the playhead; `raw`: the camera's clip alone, without ProMatch (PM_captureFrame). */
 export const captureFrame = (path: string, raw = true) => call<CaptureInfo>('PM_captureFrame', { path, raw })
@@ -139,6 +181,8 @@ export interface ApplyResult {
     before: string[]
     /** All the clip's effects but ProMatch, Opacity and Motion. */
     effects: string[]
+    /** It has a Color Mode Effect now, after the Apply (it may be empty: see app.ts colourModeGraded). */
+    colorMode?: boolean
   }>
   failed?: string[]
 }
@@ -148,6 +192,8 @@ export interface SequenceColour extends ColourSetup {
 }
 
 export const sequenceColour = () => call<SequenceColour>('PM_sequenceColour')
+/** How the clip at the playhead sits in the sequence frame (PM_clipGeometry), for the calibration pattern. */
+export const clipGeometry = () => call<ClipGeometry>('PM_clipGeometry')
 
 /** Reselect the selected clips so Effect Controls redraws (the effect's LUT name). */
 export const refreshEffectControls = () => call<number>('PM_refreshEffectControls')

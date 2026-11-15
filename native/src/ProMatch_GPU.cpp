@@ -235,12 +235,19 @@ public:
             logged = true;
             pm::logLine("GPU: filter ready on device %u (%s)", mDeviceIndex, FrameworkName(mDeviceInfo.outDeviceFramework));
         }
+        // A LUT lookup keeps up with playback. Premiere colours the render
+        // bar from this: left at 0, every ProMatch segment shows red.
+        ioInstanceData->outIsRealtime = kPrTrue;
         return suiteError_NoError;
     }
 
     prSuiteError Render(const PrGPUFilterRenderParams* inRenderParams, const PPixHand* inFrames,
                         csSDK_size_t inFrameCount, PPixHand* outFrame) override {
-        if (!inFrameCount || !outFrame || !*outFrame) return suiteError_Fail;
+        if (!inFrameCount || !outFrame || !*outFrame) {
+            pm::logLine("GPU: render without frames (in %d, out %s); CPU render", (int)inFrameCount,
+                        !outFrame ? "none" : (!*outFrame ? "empty" : "set"));
+            return suiteError_Fail;
+        }
         const PrTime t = inRenderParams->inClipTime;
         const float amount = Float(GetParam(PM_PARAM_AMOUNT, t)) / 100.f;
         if (!mLutRead) ReadLut(t);
@@ -259,7 +266,7 @@ public:
         const int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
         const int bpp = GetGPUBytesPerPixel(format);
 
-        LogSetup(format, width, height, srcData == dstData, amount);
+        LogSetup(format, width, height, srcData == dstData, amount, srcRowBytes, dstRowBytes);
         // The calibration pattern replaces the frame whatever Amount says.
         // Otherwise nothing to do in place; for separate frames, an identity
         // LUT at Amount 0 copies exactly.
@@ -285,7 +292,15 @@ public:
         }
         args.amount = active ? amount : 0.f;
         args.probe = probe;
-        if (probe) pm::probeGrid(probe, width, height, &args.probeCols, &args.probeRows);
+        if (probe) {
+            const pm::ProbeArea pa = pm::probeArea(*mLut, width, height);
+            args.probeCols = pa.cols;
+            args.probeRows = pa.rows;
+            args.probeX0 = pa.x0;
+            args.probeY0 = pa.y0;
+            args.probeX1 = pa.x1;
+            args.probeY1 = pa.y1;
+        }
 
 #ifdef _WIN32
         if (d.framework == PrGPUDeviceFramework_CUDA) {
@@ -357,15 +372,16 @@ private:
         }
     }
 
-    void LogSetup(PrPixelFormat format, int width, int height, bool inPlace, float amount) {
+    void LogSetup(PrPixelFormat format, int width, int height, bool inPlace, float amount, long srcRowBytes,
+                  long dstRowBytes) {
         static std::mutex mu;
         static std::string last;
-        char key[200];
-        std::snprintf(key, sizeof(key), "GPU Render %s fmt=%s %dx%d %s amount=%.3f lut=%d%s",
+        char key[240];
+        std::snprintf(key, sizeof(key), "GPU Render %s fmt=%s %dx%d %s rowbytes=%ld/%ld amount=%.3f lut=%d%s",
                       FrameworkName(mDeviceInfo.outDeviceFramework),
                       format == PrPixelFormat_GPU_BGRA_4444_32f ? "32f" : "16f", width, height,
-                      inPlace ? "in-place" : "src->dst", amount, mLut ? (mLut->probe ? mLut->probe : mLut->size) : 0,
-                      mLut && mLut->probe ? " pattern" : "");
+                      inPlace ? "in-place" : "src->dst", srcRowBytes, dstRowBytes, amount,
+                      mLut ? (mLut->probe ? mLut->probe : mLut->size) : 0, mLut && mLut->probe ? " pattern" : "");
         std::lock_guard<std::mutex> lock(mu);
         if (last != key) {
             last = key;
@@ -379,4 +395,22 @@ private:
 
 }  // namespace
 
-DECLARE_GPUFILTER_ENTRY(PrGPUFilterModule<ProMatchGPU>)
+// DECLARE_GPUFILTER_ENTRY(PrGPUFilterModule<ProMatchGPU>), plus a log line,
+// so effect.log shows whether Premiere registered the GPU filter at all.
+GPUFILTER_PLUGIN_ENTRY prSuiteError xGPUFilterEntry(csSDK_uint32 inHostInterfaceVersion, csSDK_int32* ioIndex,
+                                                    prBool inStartup, piSuitesPtr piSuites, PrGPUFilter* outFilter,
+                                                    PrGPUFilterInfo* outFilterInfo) {
+    using Module = PrGPUFilterModule<ProMatchGPU>;
+    if (inStartup) {
+        outFilter->CreateInstance = Module::CreateInstance;
+        outFilter->DisposeInstance = Module::DisposeInstance;
+        outFilter->GetFrameDependencies = Module::GetFrameDependencies;
+        outFilter->Precompute = Module::Precompute;
+        outFilter->Render = Module::Render;
+        const prSuiteError r = Module::Startup(piSuites, ioIndex, outFilterInfo);
+        pm::logLine("GPU: registered with host interface %u (ours %u) -> %d", (unsigned)inHostInterfaceVersion,
+                    (unsigned)PrSDKGPUFilterInterfaceVersion, (int)r);
+        return r;
+    }
+    return Module::Shutdown(piSuites, ioIndex);
+}

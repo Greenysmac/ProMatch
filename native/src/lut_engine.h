@@ -18,6 +18,10 @@ struct Lut3D {
     // calibration pattern (PMLUTP) its grid size n, with no LUT data.
     long id = 0;
     int probe = 0;
+    // The pattern's grid (0 = probeGrid's for the frame) and where in the
+    // frame it goes: x0, y0, x1, y1 as fractions of the width and height.
+    int probeCols = 0, probeRows = 0;
+    double probeRect[4] = {0, 0, 1, 1};
     // Embedded LUTs only: its name (UTF-8), shown in Effect Controls.
     std::string name;
     float domainMin[3] = {0, 0, 0};
@@ -59,15 +63,24 @@ void applyF(const Lut3D& lut, const ImageF& src, const ImageF& dst, float amount
 // values, not the display picture the match was made on. The panel measures
 // what Premiere does after the effect by showing this pattern and capturing
 // the frame (src/core/calibrate.ts): n^3 colours spanning 0..1, one per cell
-// of a grid over the whole frame. Cell idx = row * cols + col holds
-// r = idx % n, g = idx / n % n, b = idx / n^2 (each over n - 1); cells past
-// n^3 are black. Keep in step with probeLayout() in src/core/calibrate.ts
-// and the kernels.
+// of a grid over the whole frame, or over the part of the clip's frame that
+// shows on screen when the panel gives that (a clip reframed by Motion; build
+// 12+). Cell idx = row * cols + col holds r = idx % n, g = idx / n % n,
+// b = idx / n^2 (each over n - 1); cells past n^3, and pixels outside the
+// area, are black. Keep in step with src/core/calibrate.ts and the kernels.
 void probeGrid(int n, int width, int height, int* cols, int* rows);
-// The pattern's colour at pixel (x, y), with probeGrid's cols and rows.
-void probeColour(int n, int cols, int rows, int width, int height, int x, int y, float out[3]);
-void fillProbe8(int n, const Image8& dst);
-void fillProbeF(int n, const ImageF& dst);
+// Where the pattern goes in a frame: a cols x rows grid over pixels
+// [x0, x1) x [y0, y1).
+struct ProbeArea {
+    int cols, rows, x0, y0, x1, y1;
+};
+// The area for a pattern `lut` in a width x height frame: its own grid and
+// rectangle if the text gave them, else probeGrid's over the whole frame.
+ProbeArea probeArea(const Lut3D& lut, int width, int height);
+// The pattern's colour at pixel (x, y).
+void probeColour(int n, const ProbeArea& a, int x, int y, float out[3]);
+void fillProbe8(int n, const ProbeArea& a, const Image8& dst);
+void fillProbeF(int n, const ProbeArea& a, const ImageF& dst);
 
 // ---------------------------------------------------------- embedded LUTs
 // A LUT stored in the effect itself (an arbitrary-data parameter), so the
@@ -78,7 +91,9 @@ void fillProbeF(int n, const ImageF& dst);
 // match; 0 for a LUT picked in Effect Controls) and name the LUT's name,
 // percent-encoded UTF-8 ("-" for none). Older: "PMLUT2 <id> <size> ..."
 // (build 7, no name) and "PMLUT1 <size> ..." (before 7, no ID). Also
-// "PMLUTP <n>" for the calibration pattern, and "PMLUT0" for none.
+// "PMLUTP <n>" for the calibration pattern over the whole frame, or
+// "PMLUTP <n> <cols> <rows> <x0> <y0> <x1> <y1>" over part of it (the corners
+// in millionths of the width and height), and "PMLUT0" for none.
 // Premiere stores a script's string in the parameter as-is, UTF-16LE, without
 // calling the effect's scan callback (spike P9), so the parameter's bytes are
 // that text in UTF-16LE. ASCII is accepted too.
@@ -87,7 +102,7 @@ void fillProbeF(int n, const ImageF& dst);
 std::string embeddedText(const void* bytes, size_t len);
 // UTF-16LE bytes of an ASCII string (what the parameter holds).
 std::vector<uint8_t> toUtf16(const std::string& ascii);
-// Parse the text. "PMLUT0" gives size 0 and true; "PMLUTP <n>" size 0 and probe n.
+// Parse the text. "PMLUT0" gives size 0 and true; "PMLUTP <n> ..." size 0 and probe n.
 // The LUT as PMLUT3 text (its domain must be 0..1).
 std::string toEmbeddedText(const Lut3D& lut, long id, const std::string& name);
 bool parseEmbeddedText(const std::string& text, Lut3D& out, std::string* error = nullptr);

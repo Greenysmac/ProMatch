@@ -88,7 +88,7 @@ On the synthetic frames from `npm run fixtures` on a test sequence:
 | Auto | 8 pairs in 2.4 s, tested error 8.5 → 0.5. |
 | Apply, re-Apply | The effect added with the LUT embedded; re-Apply updates it in place. |
 | CPU render (before Metal) | Against the panel's software LUT: mean 0, max 1/255 at Amount 100%; mean 0.23, max 1 at 50%. |
-| Metal render | Yellow render bar; 32f and 16f; mean 0, max 1/255. `gputest`: 0 difference in 32f in place, 16f src→dst, 50% and the calibration pattern; 1.8 ms per 1080p frame. |
+| Metal render | Yellow render bar; 32f and 16f; mean 0, max 1/255. `gputest`: 0 difference in 32f in place, 16f src→dst, 50% and the calibration pattern (whole frame; build 12 draws it in part of the frame, not yet run on a Mac); 1.8 ms per 1080p frame. |
 | Change LUT, Edit LUT | Dialog in the project's `ProMatch LUTs` folder; Edit LUT reopens the panel on the match. |
 | Save, close, reopen | The LUT is still in the effect and renders the same. |
 | Media Encoder | Loads the effect itself, renders on Metal; PNG export mean 0, max 1/255. |

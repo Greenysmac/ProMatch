@@ -105,6 +105,9 @@ jobs:
           cmake --build native/build --parallel
           lipo -archs native/out/ProMatch.plugin/Contents/MacOS/ProMatch
 
+      - name: Metal kernel against the CPU
+        run: node scripts/metal-check.mjs
+
       - name: ZXPSignCmd (Adobe, checked by SHA-256)
         run: |
           mkdir -p tools

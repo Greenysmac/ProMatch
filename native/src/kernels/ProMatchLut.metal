@@ -10,6 +10,7 @@ struct LutKernelArgs {
     int srcPitch, dstPitch, is16f, width, height, size;
     float dmin[3], dmax[3], amount;
     int probe, probeCols, probeRows;
+    int probeX0, probeY0, probeX1, probeY1;
 };
 
 static float pmUnit(float v, float lo, float hi) {
@@ -20,7 +21,8 @@ static float pmUnit(float v, float lo, float hi) {
 
 // One BGRA pixel of a Premiere GPU frame: 4 floats, or 4 halves when is16f.
 // src and dst may be the same buffer. Pitches are in pixels. probe > 0 draws
-// the calibration pattern (n = probe, in a probeCols x probeRows grid) instead.
+// the calibration pattern (n = probe, in a probeCols x probeRows grid over
+// pixels [probeX0, probeX1) x [probeY0, probeY1), black around it) instead.
 kernel void ProMatchLut(device const uchar* src [[buffer(0)]], device uchar* dst [[buffer(1)]],
                         device const float* lut [[buffer(2)]], constant LutKernelArgs& a [[buffer(3)]],
                         uint2 xy [[thread_position_in_grid]]) {
@@ -33,10 +35,12 @@ kernel void ProMatchLut(device const uchar* src [[buffer(0)]], device uchar* dst
     // Calibration pattern (pm::probeColour in lut_engine.cpp): replaces the picture.
     if (a.probe > 0) {
         const int n = a.probe;
-        const int idx = int(long(y) * a.probeRows / a.height) * a.probeCols + int(long(x) * a.probeCols / a.width);
+        const bool inArea = x >= a.probeX0 && x < a.probeX1 && y >= a.probeY0 && y < a.probeY1;
+        const int idx = int(long(y - a.probeY0) * a.probeRows / (a.probeY1 - a.probeY0)) * a.probeCols +
+                        int(long(x - a.probeX0) * a.probeCols / (a.probeX1 - a.probeX0));
         const float k = 1.f / float(n - 1);
         float4 q = float4(0.f, 0.f, 0.f, 1.f);
-        if (idx < n * n * n) q = float4(float(idx / (n * n)) * k, float(idx / n % n) * k, float(idx % n) * k, 1.f);
+        if (inArea && idx < n * n * n) q = float4(float(idx / (n * n)) * k, float(idx / n % n) * k, float(idx % n) * k, 1.f);
         if (a.is16f)
             ((device half4*)dst)[di] = half4(q);
         else

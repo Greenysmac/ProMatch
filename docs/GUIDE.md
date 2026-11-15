@@ -12,7 +12,11 @@ Installing: [INSTALL.md](INSTALL.md). How the match is computed: [HOW-IT-WORKS.m
    on a hidden track), else the top visible one. For that instant, the tracks above it are
    hidden and its ProMatch effects set to 0%, then put back. So with both cameras stacked,
    select one, capture, select the other, capture; and recapturing a clip that already has its
-   match never matches on top of it. Its Lumetri and other effects stay in.
+   match never matches on top of it. Its Lumetri and other effects stay in. A clip that Motion
+   shows only part of (16:9 footage reframed in a 9:16 sequence, or cropped) is captured whole:
+   for that instant it is fitted into the frame, then put back, and the capture is cropped to
+   it, so there is more of the scene to match on. Not when Motion is keyframed: then it's
+   captured as framed.
 3. **Points.** Press **Auto** for a starting set of pairs (dashed, marked *A*), including a few
    on each face. Check them and delete any that look wrong, then add a few of your own,
    especially on plain areas Auto can't reach: click something on
@@ -129,6 +133,14 @@ pixel-identical to the Program Monitor (spikes P7–P10). On a Mac, both renders
 export match it to 1/255 ([MAC.md](MAC.md#tested-premiere-2652-m1-2026-11-04)). The installer puts it in place ([INSTALL.md](INSTALL.md)); building it
 from source: [DEVELOPMENT.md](DEVELOPMENT.md#the-native-effect).
 
+If ProMatch clips suddenly show a red render bar and play back slowly, another plug-in may have
+knocked Premiere's GPU rendering of third-party effects onto the CPU: a plug-in that runs its own
+CUDA inside Premiere and leaves its context current on Premiere's render thread makes Premiere
+render every third-party GPU effect in software until it restarts (seen with a motion-blur
+plug-in, 2026-11-14). `effect.log` shows it: `GPU Render` lines stop, and only `Render fmt=…`
+(CPU) lines follow. On a clip that also has an effect reading neighbouring frames (motion blur,
+frame blending), Premiere renders ProMatch in software anyway.
+
 In Effect Controls it shows **Amount** and two rows:
 - **LUT**, on a button showing the LUT's file name: click it to pick another `.cube` from the project's `ProMatch LUTs`
   folder; it is stored in the effect. A LUT saved by ProMatch still knows its match; any other
@@ -137,3 +149,26 @@ In Effect Controls it shows **Amount** and two rows:
   and the settings. Every Apply keeps them in `ProMatch LUTs\Matches\<name> [<id>]\`. Press
   **Apply** after changing it and every clip using the match updates. A small invisible helper
   (`helper.html`) opens the panel when it is closed.
+
+### Colour-managed sequences (ACEScct, linear compositing)
+
+In a sequence with a scene-referred working colour space (ACEScct, for example the Wide Gamut
+presets), effects see working-space values, not the picture the match was made on. The same goes
+for a Rec. 709 sequence with **linear compositing** on: in Premiere 27, ProMatch then sees log
+footage (S-Log3) still as log, and the conversion to Rec. 709 happens after it. On Apply the
+panel calibrates first: the effect on the target clip briefly shows a test pattern, the panel
+captures the Program Monitor and measures what Premiere does to each colour after the effect,
+then applies a LUT built for what the effect sees. If that turns out to be the picture as
+displayed, the plain LUT is applied. The measurement is kept for that colour setup and taken
+again after each new target capture.
+
+The pattern is drawn in the part of the clip that shows on screen, worked out from the clip's
+size and its Motion settings, so clips that don't match the sequence's size or are reframed
+(16:9 footage in a 9:16 sequence) calibrate too. For it to be read:
+- put the playhead over the target clip, with nothing on the tracks above it (titles, captions,
+  adjustment layers);
+- set Motion > Rotation to 0 while calibrating, and leave out any effect after ProMatch that
+  moves or crops the clip (Transform, Crop).
+
+If it can't be read, the Log says why and the calibration made earlier for the same colour
+setup is used, if there is one.

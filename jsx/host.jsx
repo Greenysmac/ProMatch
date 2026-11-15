@@ -14,18 +14,70 @@
  * listed in spikes/SPIKES.md with what is and is not verified.
  */
 
+/*
+ * All panels share Premiere's one ExtendScript engine, and some replace the
+ * global JSON with an old or broken copy. Use JSON when it works, else these
+ * (a broken JSON in _pmErr used to throw outside the guard: "EvalScript error.").
+ */
+function _pmQuote(s) {
+    var out = '"';
+    for (var i = 0; i < s.length; i++) {
+        var c = s.charAt(i);
+        var n = s.charCodeAt(i);
+        if (c === '"' || c === "\\") out += "\\" + c;
+        else if (c === "\n") out += "\\n";
+        else if (c === "\r") out += "\\r";
+        else if (c === "\t") out += "\\t";
+        else if (n < 32) out += "\\u" + ("000" + n.toString(16)).slice(-4);
+        else out += c;
+    }
+    return out + '"';
+}
+
+function _pmStringifyOwn(v) {
+    if (v === null || v === undefined) return "null";
+    var t = typeof v;
+    if (t === "string" || v instanceof String) return _pmQuote(String(v));
+    if (t === "number") return isFinite(v) ? String(v) : "null";
+    if (t === "boolean") return v ? "true" : "false";
+    if (t === "function") return "null";
+    var parts = [];
+    if (Object.prototype.toString.call(v) === "[object Array]") {
+        for (var i = 0; i < v.length; i++) parts.push(_pmStringifyOwn(v[i]));
+        return "[" + parts.join(",") + "]";
+    }
+    for (var k in v) {
+        if (!v.hasOwnProperty(k) || v[k] === undefined || typeof v[k] === "function") continue;
+        parts.push(_pmQuote(k) + ":" + _pmStringifyOwn(v[k]));
+    }
+    return "{" + parts.join(",") + "}";
+}
+
+function _pmStringify(v) {
+    try {
+        var s = JSON.stringify(v);
+        if (typeof s === "string") return s;
+    } catch (e) {}
+    return _pmStringifyOwn(v);
+}
+
 function _pmOk(data) {
-    return JSON.stringify({ ok: true, data: data });
+    return _pmStringify({ ok: true, data: data });
 }
 
 function _pmErr(e) {
     var msg = (e && e.message) ? e.message : String(e);
-    return JSON.stringify({ ok: false, error: msg, line: (e && e.line) ? e.line : null });
+    return _pmStringify({ ok: false, error: msg, line: (e && e.line) ? e.line : null });
 }
 
 function _pmParse(s) {
     if (!s) return {};
-    return JSON.parse(s);
+    try {
+        var v = JSON.parse(s);
+        if (v !== undefined) return v;
+    } catch (e) {}
+    // Only the panel's own JSON.stringify output arrives here (host.ts call).
+    return eval("(" + s + ")");
 }
 
 function _pmWrap(fn, argJson) {
@@ -46,10 +98,28 @@ function _pmEffectNames(clip, upTo) {
     var n = upTo === undefined ? clip.components.numItems : upTo;
     for (var i = 0; i < n; i++) {
         var mn = String(clip.components[i].matchName);
-        if (mn === "AE.ADBE Opacity" || mn === "AE.ADBE Motion" || mn.indexOf(PM_EFFECT_MATCH) !== -1) continue;
+        if (mn === "AE.ADBE Opacity" || mn === "AE.ADBE Motion" || mn === PM_COLOR_MODE_MATCH || mn.indexOf(PM_EFFECT_MATCH) !== -1) continue;
         out.push(String(clip.components[i].displayName));
     }
     return out;
+}
+
+/*
+ * Premiere 27's Color Mode keeps a clip's grade in one "Color Mode Effect"
+ * (no parameters for scripting). Effect Controls shows it last, under
+ * ProMatch, and it renders there whatever the scripting order says (tested
+ * 27.0.0): a capture includes it, but the match lands underneath it. It is
+ * reported on its own (colorMode), not in the effect names. It can be there
+ * without a grade: a clip with none had one when captured, gone once
+ * ProMatch was added (tested 27.0.0), so it only means "may be graded".
+ */
+var PM_COLOR_MODE_MATCH = "AE.ADBE CompoundComponent";
+
+function _pmHasColorMode(clip) {
+    for (var i = 0; i < clip.components.numItems; i++) {
+        if (String(clip.components[i].matchName) === PM_COLOR_MODE_MATCH) return true;
+    }
+    return false;
 }
 
 /**
@@ -135,7 +205,11 @@ function _pmClipInfo(clip, t) {
     try {
         vignette = _pmVignette(clip);
     } catch (e3) {}
-    return { name: clip.name, track: t + 1, multicam: multicam, effects: _pmEffectNames(clip), media: media, vignette: vignette };
+    var colorMode = false;
+    try {
+        colorMode = _pmHasColorMode(clip);
+    } catch (e4) {}
+    return { name: clip.name, track: t + 1, multicam: multicam, effects: _pmEffectNames(clip), media: media, vignette: vignette, colorMode: colorMode };
 }
 
 /** Topmost visible video clip under the playhead, as _pmClipInfo, else null. */
@@ -210,8 +284,10 @@ function PM_projectInfo() {
  * and may or may not append ".png" itself: the panel polls for both names.
  * With `a.raw` it is the camera alone (_pmCameraClip): the tracks above it
  * with a clip there hidden, its own track shown, its ProMatch effects at 0%,
- * all put back as soon as the export returns. Without (calibration), the
- * frame as the Program Monitor shows it.
+ * and the whole of its frame fitted into the sequence's when Motion shows
+ * only part of it (_pmFitWhole; info.clip.whole says where, so the panel
+ * crops to it), all put back as soon as the export returns. Without
+ * (calibration), the frame as the Program Monitor shows it.
  */
 function PM_captureFrame(argJson) {
     return _pmWrap(function (a) {
@@ -230,6 +306,7 @@ function PM_captureFrame(argJson) {
         var pos = _pmTicks(seq.getPlayerPosition());
         var tracks = [];
         var amounts = [];
+        var fit = null;
         try {
             for (var t = pick.track + 1; t < seq.videoTracks.numTracks; t++) {
                 var above = seq.videoTracks[t];
@@ -252,8 +329,20 @@ function PM_captureFrame(argJson) {
                 amount.setValue(0, true);
                 amounts.push({ param: amount, value: v });
             }
+            try {
+                fit = _pmFitWhole(seq, pick.clip);
+            } catch (e0) {
+                fit = { error: String(e0) };
+            }
             q.exportFramePNG(tc, a.path);
         } finally {
+            if (fit && fit.saved) {
+                for (var s = fit.saved.length - 1; s >= 0; s--) {
+                    try {
+                        fit.saved[s].param.setValue(fit.saved[s].value, true);
+                    } catch (e3) {}
+                }
+            }
             for (var i = amounts.length - 1; i >= 0; i--) {
                 try {
                     amounts[i].param.setValue(amounts[i].value, true);
@@ -271,6 +360,9 @@ function PM_captureFrame(argJson) {
         info.clip.shown = tracks.length > 0 && !!tracks[tracks.length - 1].muted;
         info.clip.bypassed = amounts.length;
         info.clip.raw = true;
+        if (fit && fit.rect) info.clip.whole = { rect: fit.rect, width: fit.width, height: fit.height, reframed: !!fit.saved };
+        if (fit && fit.keyframed) info.clip.keyframed = true;
+        if (fit && fit.error) info.clip.fitError = fit.error;
         return info;
     }, argJson);
 }
@@ -387,6 +479,191 @@ function PM_sequenceColour() {
     }, "");
 }
 
+/** "1:1", "2:1" or "1.0" as a number, else 1. */
+function _pmAspect(v) {
+    var s = String(v);
+    var m = /^\s*([\d.]+)\s*[:\/]\s*([\d.]+)\s*$/.exec(s);
+    var r = m ? Number(m[1]) / Number(m[2]) : Number(s);
+    return r > 0.1 && r < 10 ? r : 1;
+}
+
+/** A Motion parameter by display name, else by its usual index (non-English Premiere). */
+function _pmMotionParam(comp, name, index) {
+    var p = _pmParam(comp, name);
+    if (p) return p;
+    return index < comp.properties.numItems ? comp.properties[index] : null;
+}
+
+/** A parameter's value at media time `ticks` (keyframes live in the clip's media time). */
+function _pmValueAt(prop, ticks) {
+    if (typeof prop.isTimeVarying === "function" && prop.isTimeVarying()) {
+        var t = new Time();
+        t.ticks = String(ticks);
+        return prop.getValueAtTime(t);
+    }
+    return prop.getValue();
+}
+
+/** The clip's own frame size and pixel aspect (a nested sequence's too), else null. */
+function _pmMediaSize(clip) {
+    try {
+        var item = clip.projectItem;
+        var w = 0, h = 0, par = 1;
+        if (item.isSequence && item.isSequence()) {
+            for (var s = 0; s < app.project.sequences.numSequences; s++) {
+                var nest = app.project.sequences[s];
+                if (nest.projectItem && nest.projectItem.nodeId === item.nodeId) {
+                    w = Number(nest.frameSizeHorizontal);
+                    h = Number(nest.frameSizeVertical);
+                    try {
+                        par = _pmAspect(nest.getSettings().videoPixelAspectRatio);
+                    } catch (e1) {}
+                }
+            }
+        } else {
+            var m = /VideoInfo>\s*(\d+)\s*x\s*(\d+)/.exec(String(item.getProjectMetadata()));
+            if (m) {
+                w = Number(m[1]);
+                h = Number(m[2]);
+            }
+            try {
+                par = _pmAspect(item.getFootageInterpretation().pixelAspectRatio);
+            } catch (e2) {}
+        }
+        return w > 0 && h > 0 ? { width: w, height: h, par: par } : null;
+    } catch (e3) {
+        return null;
+    }
+}
+
+/**
+ * For a capture, fit the clip's whole frame into the sequence frame when
+ * Motion shows only part of it (16:9 footage in a 9:16 sequence): more of
+ * the scene to match on. Centred, scaled to fit, no rotation or crop.
+ * Returns { saved: [{ param, value }] to put back (null if nothing changed),
+ * rect: where the clip's frame is in the sequence frame (fractions),
+ * width, height: the clip's frame }, { keyframed: true } when Motion is
+ * animated (changing it would add keyframes), or null when the clip's size
+ * or Motion can't be read.
+ */
+function _pmFitWhole(seq, clip) {
+    var media = _pmMediaSize(clip);
+    if (!media) return null;
+    var motion = null;
+    for (var i = 0; i < clip.components.numItems; i++) {
+        if (String(clip.components[i].matchName) === "AE.ADBE Motion") motion = clip.components[i];
+    }
+    if (!motion) return null;
+    var names = ["Position", "Scale", "Scale Width", "Rotation", "Anchor Point", "Crop Left", "Crop Top", "Crop Right", "Crop Bottom"];
+    var p = {};
+    for (var n = 0; n < names.length; n++) {
+        var prop = _pmParam(motion, names[n]);
+        if (!prop) {
+            if (n < 5) return null; // the crops are Premiere 26+ only
+            continue;
+        }
+        if (typeof prop.isTimeVarying === "function" && prop.isTimeVarying()) return { keyframed: true };
+        p[names[n]] = prop;
+    }
+    var uniform = _pmParam(motion, "Uniform Scale");
+    var spar = 1;
+    try {
+        spar = _pmAspect(seq.getSettings().videoPixelAspectRatio);
+    } catch (e0) {}
+    // Display units (pixels times pixel aspect), the space Motion works in.
+    var Sw = Number(seq.frameSizeHorizontal) * spar, Sh = Number(seq.frameSizeVertical);
+    var Cw = media.width * media.par, Ch = media.height;
+    var f = Math.min(Sw / Cw, Sh / Ch);
+    var fw = (Cw * f) / Sw, fh = (Ch * f) / Sh;
+    var rect = { x0: (1 - fw) / 2, y0: (1 - fh) / 2, x1: (1 + fw) / 2, y1: (1 + fh) / 2 };
+    var out = { saved: null, rect: rect, width: media.width, height: media.height };
+    // Already the whole clip, unrotated and uncropped: leave it.
+    var pos = p["Position"].getValue(), anc = p["Anchor Point"].getValue();
+    var sy = Number(p["Scale"].getValue()) / 100;
+    var isUniform = !uniform || String(uniform.getValue()) === "true";
+    var sx = isUniform ? sy : Number(p["Scale Width"].getValue()) / 100;
+    var cx0 = Number(pos[0]) * Sw - sx * Number(anc[0]) * Cw, cy0 = Number(pos[1]) * Sh - sy * Number(anc[1]) * Ch;
+    var cropped = false;
+    for (var c = 5; c < names.length; c++) if (p[names[c]] && Math.abs(Number(p[names[c]].getValue())) > 1e-6) cropped = true;
+    var turned = Math.abs(Number(p["Rotation"].getValue())) > 1e-6;
+    var tol = 0.5;
+    if (!cropped && !turned && cx0 >= -tol && cy0 >= -tol && cx0 + sx * Cw <= Sw + tol && cy0 + sy * Ch <= Sh + tol) {
+        out.rect = { x0: cx0 / Sw, y0: cy0 / Sh, x1: (cx0 + sx * Cw) / Sw, y1: (cy0 + sy * Ch) / Sh };
+        return out;
+    }
+    out.saved = [];
+    var set = function (name, value) {
+        if (!p[name]) return;
+        out.saved.push({ param: p[name], value: p[name].getValue() });
+        p[name].setValue(value, true);
+    };
+    set("Anchor Point", [0.5, 0.5]);
+    set("Position", [0.5, 0.5]);
+    set("Scale", f * 100);
+    set("Scale Width", f * 100);
+    set("Rotation", 0);
+    for (var k = 5; k < names.length; k++) set(names[k], 0);
+    return out;
+}
+
+/**
+ * Where the clip at the playhead lands in the sequence frame, for the
+ * calibration pattern (probePlacement in src/core/calibrate.ts). Premiere
+ * hands effects the clip's own frame, which Motion then moves and scales
+ * onto the sequence's: a 16:9 clip reframed in a 9:16 sequence shows only a
+ * slice of it. Sizes in pixels with their pixel aspect; Motion's Position
+ * as a fraction of the sequence frame and Anchor Point of the clip's, as
+ * Premiere reports them; Scale and Scale Width in percent; Rotation in
+ * degrees; crop (Premiere 26+) left, top, right, bottom in percent. media
+ * and motion are null when they can't be read.
+ */
+function PM_clipGeometry() {
+    return _pmWrap(function () {
+        var seq = app.project.activeSequence;
+        if (!seq) throw new Error("No active sequence.");
+        var par = 1;
+        try {
+            par = _pmAspect(seq.getSettings().videoPixelAspectRatio);
+        } catch (e0) {}
+        var out = { sequence: { width: Number(seq.frameSizeHorizontal), height: Number(seq.frameSizeVertical), par: par }, clip: null, media: null, motion: null };
+        var top = _pmTopClip(seq);
+        if (!top) return out;
+        var clip = top.clip;
+        out.clip = { name: clip.name, track: top.track + 1 };
+        out.media = _pmMediaSize(clip);
+        try {
+            var motion = null;
+            for (var i = 0; i < clip.components.numItems; i++) {
+                if (String(clip.components[i].matchName) === "AE.ADBE Motion") motion = clip.components[i];
+            }
+            if (motion) {
+                var at = _pmTicks(seq.getPlayerPosition()) - _pmTicks(clip.start) + _pmTicks(clip.inPoint);
+                var pos = _pmValueAt(_pmMotionParam(motion, "Position", 0), at);
+                var anchor = _pmValueAt(_pmMotionParam(motion, "Anchor Point", 5), at);
+                // Premiere 26+: Motion crops too, in percent of the clip's frame.
+                var crop = [0, 0, 0, 0];
+                var cropNames = ["Crop Left", "Crop Top", "Crop Right", "Crop Bottom"];
+                for (var c = 0; c < 4; c++) {
+                    var cp = _pmParam(motion, cropNames[c]);
+                    if (cp) crop[c] = Number(_pmValueAt(cp, at)) || 0;
+                }
+                out.motion = {
+                    position: [Number(pos[0]), Number(pos[1])],
+                    scale: Number(_pmValueAt(_pmMotionParam(motion, "Scale", 1), at)),
+                    scaleWidth: Number(_pmValueAt(_pmMotionParam(motion, "Scale Width", 2), at)),
+                    uniform: String(_pmValueAt(_pmMotionParam(motion, "Uniform Scale", 3), at)) === "true",
+                    rotation: Number(_pmValueAt(_pmMotionParam(motion, "Rotation", 4), at)),
+                    anchor: [Number(anchor[0]), Number(anchor[1])],
+                    crop: crop
+                };
+            }
+        } catch (e4) {
+            out.motion = null;
+        }
+        return out;
+    }, "");
+}
+
 /**
  * One-click apply. Selected video clips get a ProMatch effect (added if
  * missing, reused if present) and its LUT parameter set to `lut`, the
@@ -477,7 +754,12 @@ function PM_applyMatch(argJson) {
             if (revP) revP.setValue(rev, true);
             var wasAdded = false;
             for (var x = 0; x < added.length; x++) if (added[x] === targets[q].track + ":" + targets[q].index) wasAdded = true;
+            var colorMode = false;
+            try {
+                colorMode = _pmHasColorMode(clip);
+            } catch (e6) {}
             clips.push({
+                colorMode: colorMode,
                 name: clip.name,
                 track: targets[q].track + 1,
                 added: wasAdded,

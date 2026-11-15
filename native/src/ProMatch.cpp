@@ -534,15 +534,36 @@ static PF_Err Render(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* para
         std::lock_guard<std::mutex> lock(mu);
         if (last != key) {
             last = key;
-            pm::logLine("%s", key);
+            // What the effect is handed (min/mean/max per channel on a sparse grid),
+            // so the log shows each format's encoding: in a colour-managed sequence
+            // the 8-bit and float frames need not hold the same values.
+            double lo[3] = {1e9, 1e9, 1e9}, hi[3] = {-1e9, -1e9, -1e9}, sum[3] = {0, 0, 0};
+            int count = 0;
+            const int off[3] = {2, 1, 0};  // BGRA: r, g, b
+            for (int y = 0; y < input->height; y += std::max(1, input->height / 36)) {
+                const char* row = (const char*)input->data + (long)y * input->rowbytes;
+                for (int x = 0; x < input->width; x += std::max(1, input->width / 64)) {
+                    for (int c = 0; c < 3; c++) {
+                        const double v = isFloat ? double(((const float*)row)[x * 4 + off[c]])
+                                                 : ((const uint8_t*)row)[x * 4 + off[c]] / 255.0;
+                        lo[c] = std::min(lo[c], v);
+                        hi[c] = std::max(hi[c], v);
+                        sum[c] += v;
+                    }
+                    count++;
+                }
+            }
+            pm::logLine("%s in r %.3f/%.3f/%.3f g %.3f/%.3f/%.3f b %.3f/%.3f/%.3f", key, lo[0], sum[0] / count, hi[0], lo[1],
+                        sum[1] / count, hi[1], lo[2], sum[2] / count, hi[2]);
         }
     }
 
     if (lut && lut->probe) {
+        const pm::ProbeArea area = pm::probeArea(*lut, output->width, output->height);
         if (isFloat)
-            pm::fillProbeF(lut->probe, pm::ImageF{(float*)output->data, output->width, output->height, (long)output->rowbytes, layout});
+            pm::fillProbeF(lut->probe, area, pm::ImageF{(float*)output->data, output->width, output->height, (long)output->rowbytes, layout});
         else
-            pm::fillProbe8(lut->probe, pm::Image8{(uint8_t*)output->data, output->width, output->height, (long)output->rowbytes, layout});
+            pm::fillProbe8(lut->probe, area, pm::Image8{(uint8_t*)output->data, output->width, output->height, (long)output->rowbytes, layout});
         return PF_Err_NONE;
     }
     if (!lut || amount <= 0.f) {

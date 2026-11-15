@@ -47,6 +47,25 @@ ProMatch installed, with no LUT files to copy.
 - If the effect is missing from **Effects ▸ Video Effects ▸ ProMatch**, reinstall with Premiere
   closed.
 
+### "Host script failed"
+
+The panel opened, but its script inside Premiere didn't answer. On Windows or macOS:
+
+1. Open a project, then click the red **Host script failed** label to try again.
+2. Reinstall with Premiere and Media Encoder closed.
+3. Close the **Adobe Stock** panel if it's open, and restart Premiere. Some Premiere versions
+   don't run any panel's scripts while it's open at start-up.
+4. Other panels share Premiere's scripting engine, and an old one can break it for everyone.
+   Quit Premiere and move the other folders out of the extensions folder (`ProMatch` stays),
+   then try again; put them back a few at a time to find the one that clashes:
+   - Windows: `C:\Program Files (x86)\Common Files\Adobe\CEP\extensions` and
+     `%APPDATA%\Adobe\CEP\extensions`
+   - macOS: `/Library/Application Support/Adobe/CEP/extensions` and
+     `~/Library/Application Support/Adobe/CEP/extensions`
+
+If it still fails, open the **Log**, copy the red `host.jsx` lines (including
+`host.jsx diagnostics`) and send them to us with your Premiere version.
+
 ## macOS
 
 **Needs:** macOS 11 or later, on Apple Silicon or Intel, and Premiere Pro 2021 (15.0) or later.
@@ -88,6 +107,6 @@ sudo rm -rf "/Library/Application Support/Adobe/CEP/extensions/ProMatch" "/Libra
 
 ### If the panel doesn't appear
 
-The same checks as on Windows above. If the effect shows a red render bar instead of yellow,
+The same checks as on Windows above, and "Host script failed" below. If the effect shows a red render bar instead of yellow,
 check **File ▸ Project Settings ▸ General ▸ Renderer** is *Mercury Playback Engine GPU
 Acceleration (Metal)*.
