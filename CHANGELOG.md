@@ -3,7 +3,7 @@
 Versions follow `major.minor.patch`. The release tag is `v` + the version (for example `v0.2.0`);
 the update check compares it with the version the panel was built with.
 
-## Unreleased
+## 0.3.0
 
 - **Colour-managed sequences with reframed clips.** Calibration (ACEScct and other
   scene-referred working spaces) works when the clip isn't the sequence's size or is moved
@@ -13,7 +13,8 @@ the update check compares it with the version the panel was built with.
 - Captures of a clip that Motion shows only part of (16:9 footage in a 9:16 sequence, scaled
   up or cropped) are of its whole frame: fitted into the sequence frame for the capture, put
   back straight after, and cropped to the clip. More of the scene to match on. A clip with
-  keyframed Motion is captured as framed.
+  keyframed Motion is captured as framed, and a keyframed ProMatch Amount is left on, with a
+  warning in the Log.
 - **Sharper captures in vertical sequences.** When the clip fits bigger on its side (16:9 in
   9:16, 4:5, or 9:16 phone footage in 16:9), it is turned 90° for the capture too and turned
   back in the panel: 16:9 HD in a 9:16 HD sequence is captured at 1920×1080 instead of
