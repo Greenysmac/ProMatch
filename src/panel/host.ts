@@ -90,7 +90,58 @@ export interface LutSpike {
 const inCep = typeof (window as unknown as { __adobe_cep__?: unknown }).__adobe_cep__ !== 'undefined'
 const cs: CSInterfaceLike | null = inCep && typeof CSInterface === 'function' ? new CSInterface() : null
 
-export const available = cs !== null
+/**
+ * Inside the UXP plugin (uxp/), this page runs in a <webview> and the UXP side
+ * answers the same PM_* calls over the message bridge: the page posts
+ * `{ id, fn, arg }` with window.uxpHost.postMessage, and uxp/host.js posts back
+ * `{ id, reply }`, where reply is the same JSON envelope host.jsx returns.
+ * See docs/UXP-PORT.md.
+ */
+interface UxpHostLike {
+  postMessage(message: string): void
+}
+const uxpHost = (window as unknown as { uxpHost?: UxpHostLike }).uxpHost
+const inUxp = !cs && typeof uxpHost === 'object' && uxpHost !== null && typeof uxpHost.postMessage === 'function'
+
+/** Which host answers the calls: 'cep' (jsx/host.jsx), 'uxp' (uxp/host.js) or null (a plain browser). */
+export const transport: 'cep' | 'uxp' | null = cs ? 'cep' : inUxp ? 'uxp' : null
+
+export const available = transport !== null
+
+const UXP_TIMEOUT_MS = 60000
+let uxpNext = 1
+const uxpPending = new Map<number, (reply: string) => void>()
+if (inUxp) {
+  window.addEventListener('message', (e: MessageEvent) => {
+    let msg: { id?: number; reply?: string }
+    try {
+      msg = typeof e.data === 'string' ? JSON.parse(e.data) : e.data
+    } catch {
+      return
+    }
+    if (!msg || typeof msg.id !== 'number' || typeof msg.reply !== 'string') return
+    const done = uxpPending.get(msg.id)
+    if (done) {
+      uxpPending.delete(msg.id)
+      done(msg.reply)
+    }
+  })
+}
+
+function uxpCall(fn: string, arg?: unknown): Promise<string> {
+  return new Promise((resolve) => {
+    const id = uxpNext++
+    const timer = setTimeout(() => {
+      uxpPending.delete(id)
+      resolve(JSON.stringify({ ok: false, error: `${fn}: no reply from the UXP host in ${UXP_TIMEOUT_MS / 1000} s` }))
+    }, UXP_TIMEOUT_MS)
+    uxpPending.set(id, (reply) => {
+      clearTimeout(timer)
+      resolve(reply)
+    })
+    uxpHost!.postMessage(JSON.stringify({ id, fn, arg }))
+  })
+}
 
 function evalRaw(script: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -103,8 +154,13 @@ function evalRaw(script: string): Promise<string> {
 }
 
 async function call<T>(fn: string, arg?: unknown): Promise<T> {
-  const script = arg === undefined ? `${fn}()` : `${fn}(${JSON.stringify(JSON.stringify(arg))})`
-  const raw = await evalRaw(script)
+  let raw: string
+  if (transport === 'uxp') {
+    raw = await uxpCall(fn, arg)
+  } else {
+    const script = arg === undefined ? `${fn}()` : `${fn}(${JSON.stringify(JSON.stringify(arg))})`
+    raw = await evalRaw(script)
+  }
   if (raw === 'EvalScript error.' || raw === undefined) {
     throw new Error(`${fn}: ExtendScript error (host.jsx failed to load or threw outside its guard)`)
   }
@@ -120,6 +176,7 @@ async function call<T>(fn: string, arg?: unknown): Promise<T> {
 
 /** Load sentinel: if PM_ping is missing, host.jsx did not parse; try once to re-evaluate it. */
 export async function connect(): Promise<{ app: string; version: string; sequence: string | null }> {
+  if (transport === 'uxp') return call('PM_ping')
   if (!cs) throw new Error('Not running inside Premiere Pro.')
   const has = await evalRaw('typeof PM_ping')
   if (has !== 'function' && typeof SystemPath !== 'undefined') {
@@ -137,6 +194,12 @@ export async function connect(): Promise<{ app: string; version: string; sequenc
  * the file's own load error with its line.
  */
 export async function diagnose(): Promise<string> {
+  if (transport === 'uxp') {
+    return call<{ app: string; version: string }>('PM_ping').then(
+      (p) => `UXP host answers: ${p.app} ${p.version}`,
+      (e: Error) => `UXP host: ${e.message}`,
+    )
+  }
   if (!cs) return 'not in CEP'
   const ext = typeof SystemPath !== 'undefined' ? cs.getSystemPath(SystemPath.EXTENSION).replace(/\\/g, '/') : '?'
   const jsx = `${ext}/jsx/host.jsx`

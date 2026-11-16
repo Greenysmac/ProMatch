@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #232323; }
+      webview { width: 100%; height: 100%; border: 0; }
+      #fail { color: #ddd; font: 12px system-ui, sans-serif; padding: 8px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <!--
+      The CEP panel's own page (built into web/ by scripts/build-uxp.mjs) runs
+      in this WebView, a full Chromium: UXP's canvas has no pixel access
+      (spikes/SPIKES.md, U2/U2c). host.js answers its PM_* calls.
+    -->
+    <webview id="panel" src="plugin:/web/index.html"></webview>
+    <div id="fail" hidden></div>
+    <script src="host.js"></script>
+  </body>
+</html>

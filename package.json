@@ -7,6 +7,7 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
+    "build:uxp": "node scripts/build-uxp.mjs",
     "test": "tsx scripts/test.ts",
     "fixtures": "tsx scripts/make-fixtures.ts",
     "typecheck": "tsc --noEmit",

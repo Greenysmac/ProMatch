@@ -14,3 +14,4 @@ release/
 certs/
 tools/
 .DS_Store
+uxp/web/
