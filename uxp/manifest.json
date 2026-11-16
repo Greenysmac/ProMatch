@@ -13,8 +13,11 @@
     "webview": {
       "allow": "yes",
       "allowLocalRendering": "yes",
-      "domains": "all",
-      "enableMessageBridge": "localAndRemote"
+      "domains": [
+        "https://api.github.com",
+        "https://github.com"
+      ],
+      "enableMessageBridge": "localOnly"
     }
   },
   "entrypoints": [

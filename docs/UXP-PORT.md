@@ -18,6 +18,12 @@ it does.
   WebView it finds `window.uxpHost` and posts `{ id, fn, arg }`, and the host posts back
   `{ id, reply }`. Nothing else in the panel changes for the host calls.
 
+Permissions: the WebView reaches only GitHub (the update check), the message bridge is local
+only, and the host answers only messages from `plugin:` pages and writes captures only into
+ProMatch's `captures` folder. `localFileSystem` stays `fullAccess` because the data folder
+(`~/Library/Application Support/ProMatch`, `%APPDATA%\ProMatch`) and the LUTs beside the
+project are outside the plugin's own folders.
+
 Try it: `npm run build:uxp`, then in the UXP Developer Tools **Add Plugin** →
 `uxp/manifest.json` → **Load**, and open **Window → UXP Plugins → ProMatch**.
 

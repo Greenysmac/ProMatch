@@ -101,6 +101,8 @@ const PORTED = {
     const time = await seq.getPlayerPosition()
     const size = await seq.getFrameSize()
     const full = String(a.path).replace(/\\/g, '/')
+    // Captures go only into ProMatch's own data folder (node.ts capturesDir).
+    if (!/\/ProMatch\/captures\/[^/]+$/.test(full)) throw new Error(`Refusing to write a capture outside ProMatch/captures: ${full}`)
     const slash = full.lastIndexOf('/')
     const name = `${full.slice(slash + 1)}.png`
     // The folder must end in a separator and, on Windows, use backslashes (SPIKES.md, U1).
@@ -119,6 +121,8 @@ const PORTED = {
 }
 
 view.addEventListener('message', async (e) => {
+  // Only the panel's own page (plugin:/web/…) may call the host.
+  if (e.origin && !String(e.origin).startsWith('plugin:')) return
   let msg
   try {
     msg = typeof e.data === 'string' ? JSON.parse(e.data) : e.data
